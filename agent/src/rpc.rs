@@ -281,16 +281,13 @@ impl AgentService {
         // Append guest hooks
         append_guest_hooks(&s, &mut oci)?;
 
-        // ── Æther Agent: inject shim-loader as a StartContainer hook ──
+        // ── Æther Agent: apply effects directly into the OCI spec ──
         //
-        // The shim-loader runs inside the container namespace, right before
-        // execvp(). It reads all registered add-in manifests and applies:
-        //   1. LD_PRELOAD libraries from each effect
-        //   2. Extra environment variables
-        //   3. eBPF pinned map entries for credential hallucination
-        //
-        // This is the core pre-exec hook that makes effects work.
-        append_aether_shim_hook(&mut oci)?;
+        // Read all registered add-in effects and inject them into the
+        // container's process environment. No external hook binary —
+        // the agent has the registry in memory, so it writes LD_PRELOAD
+        // and env vars straight into the spec before the container starts.
+        apply_aether_effects(&s, &mut oci)?;
 
         // write spec to bundle path, hooks might
         // read ocispec
@@ -2138,48 +2135,115 @@ fn append_guest_hooks(s: &Sandbox, oci: &mut Spec) -> Result<()> {
     Ok(())
 }
 
-/// Æther Agent: inject the shim-loader as an OCI StartContainer hook.
+/// Æther Agent: apply all registered effects directly into the OCI spec.
 ///
-/// The StartContainer hook runs inside the container namespace, after pivot_root,
-/// right before execvp(). This is the only hook point where:
-///   - LD_PRELOAD paths resolve correctly (we're in the final rootfs)
-///   - Environment modifications propagate to the exec'd process
-///   - eBPF map writes are visible to the process's syscalls
+/// Reads the add-in registry (already in memory) and injects:
+///   1. LD_PRELOAD — combined shim libraries from all effects
+///   2. Extra env vars — from each effect's env map
+///   3. eBPF credential routes — written to pinned maps
 ///
-/// The shim-loader binary reads manifests from /run/aether/manifests/ and
-/// writes the combined LD_PRELOAD + env vars to /run/aether/env/.
-fn append_aether_shim_hook(oci: &mut Spec) -> Result<()> {
-    const SHIM_LOADER_PATH: &str = "/usr/libexec/aether/shim-loader";
+/// No external hook binary. The agent does it inline because it already
+/// has the registry. The container process inherits the env at exec time.
+fn apply_aether_effects(sandbox: &Sandbox, oci: &mut Spec) -> Result<()> {
+    let registry = sandbox.addin_registry.blocking_lock();
+    let addins = registry.list();
 
-    // Only inject if the shim-loader binary exists in the rootfs.
-    // This allows the same agent to work with and without Æther packages.
-    if !Path::new(SHIM_LOADER_PATH).exists() {
+    if addins.is_empty() {
         return Ok(());
     }
 
-    let shim_hook = oci::HookBuilder::default()
-        .path(SHIM_LOADER_PATH)
-        .args(vec![
-            "aether-shim-loader".to_string(),
-            "--manifest-dir".to_string(),
-            "/run/aether/manifests".to_string(),
-            "--env-dir".to_string(),
-            "/run/aether/env".to_string(),
-        ])
-        .build()
-        .map_err(|e| anyhow!("failed to build Æther shim hook: {}", e))?;
+    // Collect LD_PRELOAD paths from all effects
+    let preloads: Vec<&str> = addins
+        .iter()
+        .flat_map(|a| &a.manifest.effects)
+        .map(|e| e.shim_library.as_str())
+        .collect();
 
-    // Ensure the OCI spec has a hooks section
-    if oci.hooks().is_none() {
-        oci.set_hooks(Some(Hooks::default()));
+    // Collect extra env vars from all effects
+    let extra_env: Vec<(&str, &str)> = addins
+        .iter()
+        .flat_map(|a| &a.manifest.effects)
+        .flat_map(|e| e.env.iter())
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    // Collect proxy rules for eBPF population
+    let proxy_rules: Vec<&aether_service::manifest::ProxyRuleEntry> = addins
+        .iter()
+        .filter_map(|a| a.manifest.proxy_rules.as_ref())
+        .flat_map(|pr| &pr.rules)
+        .collect();
+
+    // Get the process env list from the OCI spec
+    let process = oci
+        .process_mut()
+        .as_mut()
+        .ok_or_else(|| anyhow!("OCI spec has no process field"))?;
+
+    let env = process.env_mut().get_or_insert_with(Vec::new);
+
+    // Inject LD_PRELOAD (append to existing if present)
+    if !preloads.is_empty() {
+        let new_preload = preloads.join(":");
+
+        let existing_idx = env.iter().position(|e| e.starts_with("LD_PRELOAD="));
+        match existing_idx {
+            Some(idx) => {
+                // Append to existing LD_PRELOAD
+                let existing = &env[idx];
+                let current_val = existing.strip_prefix("LD_PRELOAD=").unwrap_or("");
+                if current_val.is_empty() {
+                    env[idx] = format!("LD_PRELOAD={new_preload}");
+                } else {
+                    env[idx] = format!("LD_PRELOAD={current_val}:{new_preload}");
+                }
+            }
+            None => {
+                env.push(format!("LD_PRELOAD={new_preload}"));
+            }
+        }
     }
 
-    // Append to StartContainer hooks (runs right before execvp)
-    if let Some(hooks) = oci.hooks_mut() {
-        let mut start_hooks = hooks.start_container().clone().unwrap_or_default();
-        start_hooks.push(shim_hook);
-        hooks.set_start_container(Some(start_hooks));
+    // Inject extra env vars
+    for (key, val) in &extra_env {
+        // Remove existing entry for this key (last writer wins)
+        env.retain(|e| !e.starts_with(&format!("{key}=")));
+        env.push(format!("{key}={val}"));
     }
+
+    // Populate eBPF credential routing maps
+    if !proxy_rules.is_empty() {
+        if let Err(e) = populate_ebpf_credential_routes(&proxy_rules) {
+            // Non-fatal: log and continue. Effects still work via LD_PRELOAD.
+            warn!(sl(), "Æther: failed to populate eBPF maps: {:?}", e);
+        }
+    }
+
+    info!(
+        sl(),
+        "Æther: applied {} effects, {} preloads, {} env vars, {} proxy rules",
+        addins.iter().map(|a| a.manifest.effects.len()).sum::<usize>(),
+        preloads.len(),
+        extra_env.len(),
+        proxy_rules.len(),
+    );
+
+    Ok(())
+}
+
+/// Write credential routing entries to eBPF pinned maps.
+fn populate_ebpf_credential_routes(
+    rules: &[&aether_service::manifest::ProxyRuleEntry],
+) -> Result<()> {
+    let map_dir = Path::new("/sys/fs/bpf/aether");
+    fs::create_dir_all(map_dir)?;
+
+    let entries: Vec<String> = rules
+        .iter()
+        .map(|r| format!("{}|{}|{}", r.match_pattern, r.credential_key, r.target_address))
+        .collect();
+
+    fs::write(map_dir.join("credential_routes"), entries.join("\n"))?;
 
     Ok(())
 }

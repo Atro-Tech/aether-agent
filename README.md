@@ -104,10 +104,9 @@ service AetherAgent {
 aether-agent/
 ├── agent/              # Forked Kata agent (modified: rpc.rs, sandbox.rs, main.rs)
 ├── protocols/          # Proto definitions + codegen (aether.proto added)
-├── aether-service/     # Add-in registry, manifest parsing
-├── aether-shim/        # OCI StartContainer hook (pre-exec effect loader)
+├── aether-service/     # Add-in registry, manifest parsing, context file
 ├── aether-ebpf/        # Hallucinator probe + Shimmer file I/O monitor
-├── aether-fs/          # AgentFS FUSE + writable overlay
+├── aether-fs/          # AgentFS — the root filesystem (base + add-in + writable layers)
 ├── packages/           # Default add-in manifests (5 packages)
 └── clients/            # Control-plane clients (Go + Elixir)
 ```
@@ -115,13 +114,13 @@ aether-agent/
 ## How Effects Work
 
 1. Control plane calls `RegisterAddIn` with a package manifest
-2. Agent writes manifest to `/run/aether/manifests/`
-3. Container is created; the `StartContainer` OCI hook fires
-4. `aether-shim-loader` reads all manifests:
-   - Collects LD_PRELOAD paths from effects
-   - Writes combined env to `/run/aether/env/`
-   - Populates eBPF pinned maps with credential routing
-5. Container process starts with effects active
+2. Agent stores the manifest in its in-memory registry
+3. Agent updates `/run/aether/context.json` (so the in-sandbox agent knows what tools exist)
+4. Container is created — the agent applies effects inline:
+   - Injects `LD_PRELOAD` with shim libraries directly into the OCI process env
+   - Injects extra env vars from each effect
+   - Populates eBPF pinned maps with credential routing rules
+5. Container process starts with effects already active in its environment
 6. Outbound connections hit the eBPF hallucinator, which swaps credentials
 7. File access is scored by Shimmer (allow/alert/block)
 
