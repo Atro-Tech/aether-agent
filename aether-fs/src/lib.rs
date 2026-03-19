@@ -1,14 +1,30 @@
 // Copyright 2024 The Æther Agent Authors
 // SPDX-License-Identifier: Apache-2.0
 //
-// AgentFS: FUSE filesystem for the Æther Agent.
+// AgentFS: the root filesystem for Æther Agent execution contexts.
 //
-// Two modes:
-//   1. Lazy materialization: package binaries/libraries appear as regular files
-//      but are fetched from the CAS (content-addressable store) on first read.
-//   2. Writable overlay: dynamic package installs (pip, npm, brew) write to a
-//      tmpfs-backed overlay. Useful files are extracted at end, rest discarded.
+// AgentFS IS the filesystem. Not a volume mount. Not a sidecar.
+// The agent boots into AgentFS and sees a normal Linux environment.
+//
+// Three layers, resolved top-down:
+//
+//   ┌─────────────────────────────────┐
+//   │  Writable Layer (tmpfs)         │  ← all writes land here
+//   │  pip install, npm install, etc. │
+//   ├─────────────────────────────────┤
+//   │  Add-in Layers (lazy CAS)      │  ← files appear when registered
+//   │  /usr/bin/gh, /usr/bin/rclone   │
+//   ├─────────────────────────────────┤
+//   │  Base Template (read-only)      │  ← squashfs or host directory
+//   │  /bin, /usr, /lib, /etc, ...    │
+//   └─────────────────────────────────┘
+//
+// Read resolution: writable → add-ins → base (first match wins)
+// Write target: always the writable layer
+//
+// The agent never knows it's on FUSE.
 
-pub mod fuse_ops;
+pub mod layer;
 pub mod materializer;
 pub mod overlay;
+pub mod tree;
