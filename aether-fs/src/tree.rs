@@ -214,7 +214,7 @@ mod tests {
 
         // Register an add-in
         let mut gh_layer = AddInLayer::new("gh-abc123");
-        gh_layer.add_file("/usr/bin/gh", "bin/gh", "sha256:abc", 0o755);
+        gh_layer.put_file("/usr/bin/gh", b"gh-binary-content".to_vec(), 0o755);
 
         tree.addin_handle().write().unwrap().push(gh_layer);
 
@@ -261,7 +261,7 @@ mod tests {
 
         // Add-in provides /usr/bin/gh
         let mut gh = AddInLayer::new("gh");
-        gh.add_file("/usr/bin/gh", "bin/gh", "sha256:a", 0o755);
+        gh.put_file("/usr/bin/gh", b"gh-binary".to_vec(), 0o755);
         tree.addin_handle().write().unwrap().push(gh);
 
         // Writable layer has /usr/bin/custom-tool

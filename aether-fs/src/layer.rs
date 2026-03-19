@@ -2,17 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Filesystem layers. AgentFS stacks three layer types into a unified tree.
-// Each layer can answer "does this path exist?" and "give me its content."
 //
 // Resolution order: Writable → AddIn (newest first) → Base
 // First layer that has the path wins.
+//
+// IMPORTANT: The agent never fetches files. The control plane pushes
+// content into layers from the outside. Files just appear.
 
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-// ─── File metadata (shared across all layers) ───
+// ─── File metadata ───
 
 #[derive(Debug, Clone)]
 pub struct FileMeta {
@@ -44,32 +46,17 @@ impl FileMeta {
 
 // ─── Layer trait ───
 
-/// A filesystem layer that can be stacked.
-/// Layers are asked "do you have this path?" in priority order.
 pub trait Layer: Send + Sync {
-    /// Check if this layer has the given path.
     fn exists(&self, path: &str) -> bool;
-
-    /// Get metadata for a path. Returns None if this layer doesn't have it.
     fn metadata(&self, path: &str) -> Option<FileMeta>;
-
-    /// Read file content. Returns None if this layer doesn't have it.
-    /// For lazy layers, this may trigger a fetch.
     fn read(&self, path: &str) -> Option<io::Result<Vec<u8>>>;
-
-    /// List entries in a directory. Returns None if this layer doesn't have it.
     fn readdir(&self, path: &str) -> Option<Vec<String>>;
-
-    /// Human-readable name for logging.
     fn name(&self) -> &str;
 }
 
-// ─── BaseLayer: the read-only template ───
+// ─── BaseLayer: read-only template directory ───
 
-/// The bottom layer. A real directory on disk (or a mounted squashfs).
-/// Contains the base Linux environment: /bin, /usr, /lib, /etc, etc.
 pub struct BaseLayer {
-    /// Root directory of the base template on the host.
     root: PathBuf,
 }
 
@@ -91,9 +78,7 @@ impl Layer for BaseLayer {
     }
 
     fn metadata(&self, path: &str) -> Option<FileMeta> {
-        let host = self.host_path(path);
-        let meta = std::fs::metadata(&host).ok()?;
-
+        let meta = std::fs::metadata(self.host_path(path)).ok()?;
         Some(FileMeta {
             size: meta.len(),
             mode: if meta.is_dir() { 0o755 } else { 0o644 },
@@ -111,14 +96,11 @@ impl Layer for BaseLayer {
     }
 
     fn readdir(&self, path: &str) -> Option<Vec<String>> {
-        let host = self.host_path(path);
-        let entries = std::fs::read_dir(&host).ok()?;
-
+        let entries = std::fs::read_dir(self.host_path(path)).ok()?;
         let names: Vec<String> = entries
             .filter_map(|e| e.ok())
             .filter_map(|e| e.file_name().into_string().ok())
             .collect();
-
         Some(names)
     }
 
@@ -127,31 +109,26 @@ impl Layer for BaseLayer {
     }
 }
 
-// ─── AddInLayer: files that appear when a package is registered ───
+// ─── AddInLayer: files pushed in by the control plane ───
+//
+// The control plane reads files from object storage (S3/R2/GCS),
+// then pushes the bytes into this layer. The agent never fetches.
+// Files appear because the control plane put them here.
 
-/// A layer backed by lazily-materialized CAS content.
-/// Files "exist" as soon as the add-in is registered (metadata is known),
-/// but content is fetched on first read.
 pub struct AddInLayer {
-    /// Add-in ID (e.g. "gh-a1b2c3d4")
     pub addin_id: String,
 
-    /// Paths this add-in provides, mapped to their metadata.
-    /// Key is the absolute path as the agent sees it: "/usr/bin/gh"
-    pub files: HashMap<String, AddInFile>,
+    /// path → file content (the actual bytes, pushed by control plane)
+    files: HashMap<String, AddInFile>,
 
-    /// Directories this add-in creates (derived from file paths).
-    pub dirs: HashMap<String, Vec<String>>,
+    /// directories created by the files (derived from paths)
+    dirs: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
-pub struct AddInFile {
-    pub meta: FileMeta,
-    pub content_address: String,
-    /// Path within the CAS package (e.g. "bin/gh")
-    pub cas_relative_path: String,
-    /// Local cache path (populated after first read)
-    pub cached_content: Option<PathBuf>,
+struct AddInFile {
+    content: Vec<u8>,
+    meta: FileMeta,
 }
 
 impl AddInLayer {
@@ -163,60 +140,53 @@ impl AddInLayer {
         }
     }
 
-    /// Register a file at an absolute path in the virtual filesystem.
-    /// e.g. install_path="/usr/bin/gh", cas_path="bin/gh"
-    pub fn add_file(
-        &mut self,
-        install_path: &str,
-        cas_path: &str,
-        content_address: &str,
-        mode: u32,
-    ) {
+    /// Put a file into this layer. Called by the control plane.
+    /// The bytes are already here — no fetching, no CAS, no lazy loading.
+    pub fn put_file(&mut self, path: &str, content: Vec<u8>, mode: u32) {
+        let size = content.len() as u64;
         self.files.insert(
-            install_path.to_string(),
+            path.to_string(),
             AddInFile {
-                meta: FileMeta::file(0, mode),
-                content_address: content_address.to_string(),
-                cas_relative_path: cas_path.to_string(),
-                cached_content: None,
+                content,
+                meta: FileMeta::file(size, mode),
             },
         );
-
-        // Register parent directories so readdir works
-        self.register_parent_dirs(install_path);
+        self.register_parent_dirs(path);
     }
 
     fn register_parent_dirs(&mut self, file_path: &str) {
         let path = Path::new(file_path);
+
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("")
             .to_string();
 
-        if let Some(parent) = path.parent() {
-            let parent_str = parent.to_string_lossy().to_string();
-            self.dirs
-                .entry(parent_str.clone())
-                .or_default()
-                .push(filename);
+        let mut current = path.parent();
+        let mut child_name = filename;
 
-            // Recurse up to register intermediate directories
-            if parent_str != "/" && !parent_str.is_empty() {
-                let dir_name = parent
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                if let Some(grandparent) = parent.parent() {
-                    let gp_str = grandparent.to_string_lossy().to_string();
-                    let entries = self.dirs.entry(gp_str).or_default();
-                    if !entries.contains(&dir_name) {
-                        entries.push(dir_name);
-                    }
-                }
+        while let Some(dir) = current {
+            let dir_str = dir.to_string_lossy().to_string();
+            if dir_str.is_empty() {
+                break;
             }
+
+            let entries = self.dirs.entry(dir_str.clone()).or_default();
+            if !entries.contains(&child_name) {
+                entries.push(child_name.clone());
+            }
+
+            if dir_str == "/" {
+                break;
+            }
+
+            child_name = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            current = dir.parent();
         }
     }
 }
@@ -230,32 +200,15 @@ impl Layer for AddInLayer {
         if let Some(file) = self.files.get(path) {
             return Some(file.meta.clone());
         }
-
         if self.dirs.contains_key(path) {
             return Some(FileMeta::dir(0o755));
         }
-
         None
     }
 
     fn read(&self, path: &str) -> Option<io::Result<Vec<u8>>> {
         let file = self.files.get(path)?;
-
-        // If already cached locally, read from cache
-        if let Some(ref cache_path) = file.cached_content {
-            return Some(std::fs::read(cache_path));
-        }
-
-        // Not cached yet — materializer needs to fetch it.
-        // Return a placeholder error. The FUSE handler will call the
-        // materializer and retry.
-        Some(Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "needs materialization: {}:{}",
-                file.content_address, file.cas_relative_path
-            ),
-        )))
+        Some(Ok(file.content.clone()))
     }
 
     fn readdir(&self, path: &str) -> Option<Vec<String>> {
@@ -267,12 +220,9 @@ impl Layer for AddInLayer {
     }
 }
 
-// ─── WritableLayer: captures all writes ───
+// ─── WritableLayer: captures all writes from inside ───
 
-/// The top layer. All writes land here.
-/// Backed by a tmpfs directory so nothing persists unless extracted.
 pub struct WritableLayer {
-    /// Root directory for writable content (tmpfs mount point)
     root: PathBuf,
 }
 
@@ -288,7 +238,6 @@ impl WritableLayer {
         self.root.join(path.trim_start_matches('/'))
     }
 
-    /// Write a file (called by FUSE write handler).
     pub fn write_file(&self, path: &str, data: &[u8]) -> io::Result<()> {
         let host = self.host_path(path);
         if let Some(parent) = host.parent() {
@@ -297,12 +246,10 @@ impl WritableLayer {
         std::fs::write(&host, data)
     }
 
-    /// Create a directory (called by FUSE mkdir handler).
     pub fn mkdir(&self, path: &str) -> io::Result<()> {
         std::fs::create_dir_all(self.host_path(path))
     }
 
-    /// Delete a file or directory (marks as deleted in the overlay).
     pub fn remove(&self, path: &str) -> io::Result<()> {
         let host = self.host_path(path);
         if host.is_dir() {
@@ -312,7 +259,6 @@ impl WritableLayer {
         }
     }
 
-    /// List all written paths (for artifact extraction at task end).
     pub fn written_paths(&self) -> Vec<PathBuf> {
         let mut paths = Vec::new();
         collect_files_recursive(&self.root, &self.root, &mut paths);
@@ -326,9 +272,7 @@ impl Layer for WritableLayer {
     }
 
     fn metadata(&self, path: &str) -> Option<FileMeta> {
-        let host = self.host_path(path);
-        let meta = std::fs::metadata(&host).ok()?;
-
+        let meta = std::fs::metadata(self.host_path(path)).ok()?;
         Some(FileMeta {
             size: meta.len(),
             mode: if meta.is_dir() { 0o755 } else { 0o644 },
@@ -346,19 +290,12 @@ impl Layer for WritableLayer {
     }
 
     fn readdir(&self, path: &str) -> Option<Vec<String>> {
-        let host = self.host_path(path);
-        let entries = std::fs::read_dir(&host).ok()?;
-
+        let entries = std::fs::read_dir(self.host_path(path)).ok()?;
         let names: Vec<String> = entries
             .filter_map(|e| e.ok())
             .filter_map(|e| e.file_name().into_string().ok())
             .collect();
-
-        if names.is_empty() {
-            return None;
-        }
-
-        Some(names)
+        if names.is_empty() { None } else { Some(names) }
     }
 
     fn name(&self) -> &str {
@@ -366,13 +303,11 @@ impl Layer for WritableLayer {
     }
 }
 
-/// Recursively collect all file paths relative to root.
 fn collect_files_recursive(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
     };
-
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -389,7 +324,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn test_base_layer_reads_host_files() {
+    fn test_base_layer() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("usr/bin")).unwrap();
         fs::write(dir.path().join("usr/bin/ls"), b"fake-ls").unwrap();
@@ -400,41 +335,38 @@ mod tests {
 
         let data = base.read("/usr/bin/ls").unwrap().unwrap();
         assert_eq!(data, b"fake-ls");
-
-        let entries = base.readdir("/usr/bin").unwrap();
-        assert!(entries.contains(&"ls".to_string()));
     }
 
     #[test]
-    fn test_addin_layer_files_appear_at_real_paths() {
+    fn test_addin_layer_files_pushed_by_control_plane() {
         let mut layer = AddInLayer::new("gh-abc123");
-        layer.add_file("/usr/bin/gh", "bin/gh", "sha256:abc", 0o755);
+
+        // Control plane pushes the file content — no fetching
+        layer.put_file("/usr/bin/gh", b"#!/bin/sh\necho gh".to_vec(), 0o755);
 
         assert!(layer.exists("/usr/bin/gh"));
-        assert!(layer.exists("/usr/bin")); // parent dir exists too
+        assert!(layer.exists("/usr/bin")); // parent dir
         assert!(!layer.exists("/usr/bin/rclone"));
 
+        // Content is immediately available — no lazy loading
+        let data = layer.read("/usr/bin/gh").unwrap().unwrap();
+        assert_eq!(data, b"#!/bin/sh\necho gh");
+
         let meta = layer.metadata("/usr/bin/gh").unwrap();
-        assert!(!meta.is_dir);
+        assert_eq!(meta.size, b"#!/bin/sh\necho gh".len() as u64);
         assert_eq!(meta.mode, 0o755);
 
-        let dir_entries = layer.readdir("/usr/bin").unwrap();
-        assert!(dir_entries.contains(&"gh".to_string()));
+        let entries = layer.readdir("/usr/bin").unwrap();
+        assert!(entries.contains(&"gh".to_string()));
     }
 
     #[test]
-    fn test_writable_layer_captures_writes() {
+    fn test_writable_layer() {
         let dir = tempfile::tempdir().unwrap();
         let layer = WritableLayer::new(dir.path());
 
-        layer.write_file("/etc/config.toml", b"key = 1").unwrap();
-        assert!(layer.exists("/etc/config.toml"));
-
-        let data = layer.read("/etc/config.toml").unwrap().unwrap();
-        assert_eq!(data, b"key = 1");
-
-        let paths = layer.written_paths();
-        assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0], PathBuf::from("/etc/config.toml"));
+        layer.write_file("/tmp/out.txt", b"hello").unwrap();
+        assert!(layer.exists("/tmp/out.txt"));
+        assert_eq!(layer.read("/tmp/out.txt").unwrap().unwrap(), b"hello");
     }
 }

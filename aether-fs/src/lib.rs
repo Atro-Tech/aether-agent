@@ -3,28 +3,23 @@
 //
 // AgentFS: the root filesystem for Æther Agent execution contexts.
 //
-// AgentFS IS the filesystem. Not a volume mount. Not a sidecar.
-// The agent boots into AgentFS and sees a normal Linux environment.
+// FUSE IS the filesystem. Not a volume. Not a sidecar.
 //
 // Three layers, resolved top-down:
 //
 //   ┌─────────────────────────────────┐
-//   │  Writable Layer (tmpfs)         │  ← all writes land here
-//   │  pip install, npm install, etc. │
+//   │  Writable Layer (tmpfs)         │  ← writes from inside the machine
 //   ├─────────────────────────────────┤
-//   │  Add-in Layers (lazy CAS)      │  ← files appear when registered
-//   │  /usr/bin/gh, /usr/bin/rclone   │
+//   │  Add-in Layers                  │  ← pushed in by the control plane
+//   │  /usr/bin/gh just appears       │    from object storage (S3/R2/GCS)
 //   ├─────────────────────────────────┤
-//   │  Base Template (read-only)      │  ← squashfs or host directory
-//   │  /bin, /usr, /lib, /etc, ...    │
+//   │  Base Template (read-only)      │  ← the golden image directory
 //   └─────────────────────────────────┘
 //
-// Read resolution: writable → add-ins → base (first match wins)
-// Write target: always the writable layer
-//
-// The agent never knows it's on FUSE.
+// The agent never fetches files. The control plane reads from object
+// storage and pushes bytes into AgentFS. Files just appear.
+// This is outside-in, not inside-out.
 
 pub mod layer;
-pub mod materializer;
 pub mod overlay;
 pub mod tree;
