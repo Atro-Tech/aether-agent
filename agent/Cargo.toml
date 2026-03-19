@@ -85,17 +85,18 @@ kata-agent-policy = { path = "policy" }
 rustjail = { path = "rustjail" }
 vsock-exporter = { path = "vsock-exporter" }
 
-mem-agent = { path = "../libs/mem-agent" }
+mem-agent = { path = "../mem-agent" }
 
-kata-sys-util = { path = "../libs/kata-sys-util" }
-kata-types = { path = "../libs/kata-types", features = ["safe-path"] }
+kata-sys-util = { path = "../kata-sys-util" }
+kata-types = { path = "../kata-types", features = ["safe-path"] }
 # Note: this crate sets the slog 'max_*' features which allows the log level
 # to be modified at runtime.
-logging = { path = "../libs/logging" }
-protocols = { path = "../libs/protocols" }
-runtime-spec = { path = "../libs/runtime-spec" }
-safe-path = { path = "../libs/safe-path" }
-test-utils = { path = "../libs/test-utils" }
+logging = { path = "../logging" }
+protocols = { path = "../protocols" }
+runtime-spec = { path = "../runtime-spec" }
+safe-path = { path = "../safe-path" }
+test-utils = { path = "../test-utils" }
+aether-service = { path = "../aether-service" }
 
 
 [package]
@@ -180,6 +181,7 @@ safe-path.workspace = true
 # to be modified at runtime.
 logging.workspace = true
 vsock-exporter.workspace = true
+aether-service.workspace = true
 
 # Initdata
 base64 = "0.22"

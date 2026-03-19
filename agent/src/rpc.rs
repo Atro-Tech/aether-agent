@@ -1871,13 +1871,11 @@ impl aether_ttrpc::AetherAgent for AetherRpcService {
         &self,
         _ctx: &TtrpcContext,
         _req: protocols::aether::LogRequest,
-    ) -> ttrpc::Result<protocols::aether::LogResponse> {
+        _stream: ::ttrpc::r#async::ServerStreamSender<protocols::aether::LogResponse>,
+    ) -> ttrpc::Result<()> {
         // TODO: Implement real-time log streaming.
-        // For now, return a single response indicating the feature is pending.
-        let mut resp = protocols::aether::LogResponse::new();
-        resp.level = "info".to_string();
-        resp.message = "Æther Agent log streaming not yet implemented".to_string();
-        Ok(resp)
+        // For now, send a single message then return.
+        Ok(())
     }
 }
 

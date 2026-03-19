@@ -25,6 +25,7 @@ pub struct RegisteredAddIn {
 
 /// In-memory registry of all add-in packages.
 /// Also persists manifests to disk for the shim-loader to read.
+#[derive(Debug)]
 pub struct AddInRegistry {
     addins: HashMap<String, RegisteredAddIn>,
     manifest_dir: PathBuf,
