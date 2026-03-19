@@ -68,6 +68,13 @@ impl AddInRegistry {
         self.persist_manifest(&id, toml_str)?;
 
         self.addins.insert(id.clone(), entry);
+
+        // Update the in-sandbox context file so the agent knows what tools exist
+        if let Err(e) = crate::context::write_context_file(self) {
+            // Non-fatal: the context file is a convenience, not critical path
+            eprintln!("aether: warning: failed to update context file: {e}");
+        }
+
         Ok(id)
     }
 
@@ -86,6 +93,9 @@ impl AddInRegistry {
         if removed.is_some() {
             let path = self.manifest_dir.join(format!("{}.toml", addin_id));
             let _ = std::fs::remove_file(path);
+
+            // Update context file (tool disappears)
+            let _ = crate::context::write_context_file(self);
         }
 
         removed

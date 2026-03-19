@@ -1,5 +1,4 @@
 # Æther Agent — rclone Dropbox add-in manifest
-# Effect: intercepts rclone commands targeting Dropbox, swaps OAuth tokens via eBPF.
 
 [package]
 name = "rclone-dropbox"
@@ -10,12 +9,20 @@ content_address = "sha256:rclone-1.68.0"
 [[effects]]
 binary_name = "rclone"
 shim_library = "/usr/lib/aether/shims/librclone_shim.so"
+tool_type = "hybrid"
+description = "rclone file sync for Dropbox — upload, download, sync files. OAuth tokens injected automatically."
+examples = [
+    "rclone copy ./report.pdf dropbox:reports/",
+    "rclone ls dropbox:documents/",
+    "rclone sync ./output dropbox:project-output/",
+]
+capabilities = ["file-sync", "upload", "download", "dropbox"]
 
 [effects.env]
 RCLONE_CONFIG_SOURCE = "ebpf:dropbox-oauth"
 
 [[binaries]]
-path = "bin/rclone"
+path = "usr/bin/rclone"
 source = "lazy"
 
 [proxy_rules]

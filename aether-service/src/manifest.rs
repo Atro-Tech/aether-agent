@@ -43,6 +43,29 @@ pub struct Effect {
     pub shim_library: String,
     #[serde(default)]
     pub env: HashMap<String, String>,
+
+    // ── Capability metadata (read by the in-sandbox agent) ──
+
+    /// "native" = real binary, "shimmed" = effect creates the illusion,
+    /// "hybrid" = real binary + credential injection.
+    #[serde(default = "default_tool_type")]
+    pub tool_type: String,
+
+    /// Human-readable description of what this tool does.
+    #[serde(default)]
+    pub description: String,
+
+    /// Example invocations the agent can use.
+    #[serde(default)]
+    pub examples: Vec<String>,
+
+    /// What capabilities this tool provides (e.g. ["git", "pr", "issue"]).
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+fn default_tool_type() -> String {
+    "native".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

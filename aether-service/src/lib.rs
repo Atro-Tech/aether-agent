@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Æther Agent service crate.
-// Provides add-in registration, manifest parsing, and the registry
-// that the ttrpc handler and shim-loader both depend on.
+// Provides add-in registration, manifest parsing, context file,
+// and the registry that the ttrpc handler and shim-loader both depend on.
 
+pub mod context;
 pub mod manifest;
 pub mod registry;
 
