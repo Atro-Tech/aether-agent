@@ -2,13 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Parses per-package TOML manifests into typed Rust structs.
-// Each manifest declares a package's effects (shims), binaries, and proxy rules.
+//
+// Æther does NOT define what fields an add-in should have beyond the
+// minimum needed to operate (package name, version, binary paths).
+// Everything else is freeform metadata that Æther passes through to
+// the in-sandbox context file. The add-in decides how to describe itself.
 
-use serde::Deserialize;
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 /// Top-level manifest for an add-in package.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Manifest {
     pub package: PackageInfo,
 
@@ -23,59 +28,54 @@ pub struct Manifest {
 
     #[serde(default)]
     pub proxy_rules: Option<ProxyRulesConfig>,
+
+    /// Freeform metadata. The add-in puts whatever it wants here.
+    /// Æther passes it through to context.json untouched.
+    /// Examples: tool_type, capabilities, examples, description,
+    /// auth_method, rate_limits, documentation_url — anything.
+    #[serde(default, flatten)]
+    pub extra: HashMap<String, toml::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PackageInfo {
     pub name: String,
     pub version: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub content_address: String,
+    /// Freeform. Æther doesn't interpret this.
+    #[serde(default, flatten)]
+    pub extra: HashMap<String, toml::Value>,
 }
 
-/// An effect is the core illusion unit: what happens when a binary runs.
-/// Each effect maps a binary name to an LD_PRELOAD shim and extra env vars.
-#[derive(Debug, Clone, Deserialize)]
+/// An effect: what happens when a binary runs.
+/// Only binary_name and shim_library are required by Æther.
+/// Everything else is freeform metadata passed to the agent.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Effect {
+    /// The command name Æther needs to know about.
     pub binary_name: String,
+
+    /// The LD_PRELOAD library Æther loads.
     pub shim_library: String,
+
+    /// Extra env vars Æther injects.
     #[serde(default)]
     pub env: HashMap<String, String>,
 
-    // ── Capability metadata (read by the in-sandbox agent) ──
-
-    /// "native" = real binary, "shimmed" = effect creates the illusion,
-    /// "hybrid" = real binary + credential injection.
-    #[serde(default = "default_tool_type")]
-    pub tool_type: String,
-
-    /// Human-readable description of what this tool does.
-    #[serde(default)]
-    pub description: String,
-
-    /// Example invocations the agent can use.
-    #[serde(default)]
-    pub examples: Vec<String>,
-
-    /// What capabilities this tool provides (e.g. ["git", "pr", "issue"]).
-    #[serde(default)]
-    pub capabilities: Vec<String>,
+    /// Everything else: description, tool_type, capabilities,
+    /// examples, auth_info, rate_limits — the add-in decides.
+    /// Æther passes it all through to context.json.
+    #[serde(default, flatten)]
+    pub meta: HashMap<String, toml::Value>,
 }
 
-fn default_tool_type() -> String {
-    "native".to_string()
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BinaryEntry {
     pub path: String,
     #[serde(default = "default_source")]
     pub source: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LibraryEntry {
     pub path: String,
     #[serde(default = "default_source")]
@@ -86,13 +86,13 @@ fn default_source() -> String {
     "lazy".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProxyRulesConfig {
     #[serde(default)]
     pub rules: Vec<ProxyRuleEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProxyRuleEntry {
     pub match_pattern: String,
     pub credential_key: String,
@@ -111,29 +111,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_manifest() {
+    fn test_parse_minimal_manifest() {
         let toml = r#"
 [package]
 name = "gh"
 version = "2.62.0"
-description = "GitHub CLI"
-content_address = "sha256:abc123"
 
 [[effects]]
 binary_name = "gh"
 shim_library = "/usr/lib/aether/shims/libgh_shim.so"
 
-[effects.env]
-GITHUB_TOKEN_SOURCE = "ebpf:gh-token"
-
 [[binaries]]
 path = "bin/gh"
-source = "lazy"
 "#;
         let m = parse_manifest(toml).unwrap();
         assert_eq!(m.package.name, "gh");
-        assert_eq!(m.effects.len(), 1);
         assert_eq!(m.effects[0].binary_name, "gh");
-        assert_eq!(m.binaries[0].path, "bin/gh");
+    }
+
+    #[test]
+    fn test_freeform_metadata_passes_through() {
+        let toml = r#"
+[package]
+name = "gh"
+version = "2.62.0"
+description = "GitHub CLI"
+documentation_url = "https://cli.github.com"
+
+[[effects]]
+binary_name = "gh"
+shim_library = "/usr/lib/aether/shims/libgh_shim.so"
+tool_type = "hybrid"
+description = "GitHub CLI with cred injection"
+examples = ["gh repo list", "gh pr create"]
+capabilities = ["git", "pr", "issue"]
+rate_limit = "5000/hour"
+
+[[binaries]]
+path = "bin/gh"
+"#;
+        let m = parse_manifest(toml).unwrap();
+
+        // Freeform package fields
+        assert!(m.package.extra.contains_key("description"));
+        assert!(m.package.extra.contains_key("documentation_url"));
+
+        // Freeform effect fields
+        let effect = &m.effects[0];
+        assert!(effect.meta.contains_key("tool_type"));
+        assert!(effect.meta.contains_key("capabilities"));
+        assert!(effect.meta.contains_key("rate_limit"));
+        assert!(effect.meta.contains_key("examples"));
     }
 }
