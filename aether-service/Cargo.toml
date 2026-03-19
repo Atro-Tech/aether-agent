@@ -1,0 +1,19 @@
+[package]
+name = "aether-service"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Æther Agent ttrpc service handler — manages add-in registration, effects, and materialization"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+slog = "2.5"
+slog-scope = "4.1"
+tokio = { version = "1", features = ["fs", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"

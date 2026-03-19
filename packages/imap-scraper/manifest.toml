@@ -1,0 +1,30 @@
+# Æther Agent — IMAP scraper add-in manifest
+# Effect: intercepts IMAP connections, swaps credentials via eBPF.
+
+[package]
+name = "imap-scraper"
+version = "0.3.0"
+description = "IMAP email scraper with credential hallucination"
+content_address = "sha256:imap-scraper-0.3.0"
+
+[[effects]]
+binary_name = "imap-scraper"
+shim_library = "/usr/lib/aether/shims/libimap_shim.so"
+
+[effects.env]
+IMAP_CREDENTIAL_SOURCE = "ebpf:imap-password"
+
+[[binaries]]
+path = "bin/imap-scraper"
+source = "lazy"
+
+[proxy_rules]
+[[proxy_rules.rules]]
+match_pattern = "*.gmail.com"
+credential_key = "imap-password"
+target_address = ""
+
+[[proxy_rules.rules]]
+match_pattern = "imap.*"
+credential_key = "imap-password"
+target_address = ""

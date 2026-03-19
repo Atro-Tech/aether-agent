@@ -1,0 +1,33 @@
+# Æther Agent — Playwright add-in manifest
+# Effect: sets browser paths and env vars for headless Chromium.
+# No credential swap needed — this is a pure environment effect.
+
+[package]
+name = "playwright"
+version = "1.49.0"
+description = "Playwright browser automation with lazy-materialized Chromium"
+content_address = "sha256:playwright-1.49.0"
+
+[[effects]]
+binary_name = "playwright"
+shim_library = "/usr/lib/aether/shims/libplaywright_shim.so"
+
+[effects.env]
+PLAYWRIGHT_BROWSERS_PATH = "/usr/lib/aether/playwright/browsers"
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"
+
+[[binaries]]
+path = "bin/playwright"
+source = "lazy"
+
+[[binaries]]
+path = "browsers/chromium/chrome"
+source = "lazy"
+
+[[libraries]]
+path = "browsers/chromium/libEGL.so"
+source = "lazy"
+
+[[libraries]]
+path = "browsers/chromium/libGLESv2.so"
+source = "lazy"

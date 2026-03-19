@@ -1,0 +1,24 @@
+# Æther Agent — GitHub CLI add-in manifest
+# Effect: intercepts gh commands, injects GitHub token via eBPF credential swap.
+
+[package]
+name = "gh"
+version = "2.62.0"
+description = "GitHub CLI with credential hallucination"
+content_address = "sha256:gh-2.62.0"
+
+[[effects]]
+binary_name = "gh"
+shim_library = "/usr/lib/aether/shims/libgh_shim.so"
+
+[effects.env]
+GITHUB_TOKEN_SOURCE = "ebpf:gh-token"
+
+[[binaries]]
+path = "bin/gh"
+source = "lazy"
+
+[proxy_rules]
+[[proxy_rules.rules]]
+match_pattern = "api.github.com"
+credential_key = "gh-token"

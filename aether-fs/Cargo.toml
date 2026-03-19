@@ -1,0 +1,11 @@
+[package]
+name = "aether-fs"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "AgentFS — FUSE filesystem for Æther Agent lazy materialization and writable package overlays"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["sync", "fs"] }

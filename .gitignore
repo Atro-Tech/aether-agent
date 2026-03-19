@@ -1,0 +1,7 @@
+target/
+*.o
+*.so
+*.dylib
+.DS_Store
+Cargo.lock
+!agent/Cargo.lock

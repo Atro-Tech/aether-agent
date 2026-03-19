@@ -1,0 +1,28 @@
+# Æther Agent — Python Excel (openpyxl) add-in manifest
+# Effect: sets PYTHONPATH to include openpyxl wheel.
+# No credential swap — this is a pure environment/materialization effect.
+
+[package]
+name = "python-excel"
+version = "3.1.5"
+description = "Python with openpyxl for Excel file manipulation"
+content_address = "sha256:python-excel-3.1.5"
+
+[[effects]]
+binary_name = "python3"
+shim_library = "/usr/lib/aether/shims/libpyexcel_shim.so"
+
+[effects.env]
+PYTHONPATH = "/usr/lib/aether/python-excel/lib"
+
+[[binaries]]
+path = "bin/python3"
+source = "lazy"
+
+[[libraries]]
+path = "lib/openpyxl/__init__.py"
+source = "lazy"
+
+[[libraries]]
+path = "lib/openpyxl/reader/excel.py"
+source = "lazy"
