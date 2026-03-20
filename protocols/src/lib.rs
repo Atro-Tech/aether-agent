@@ -39,9 +39,3 @@ pub mod confidential_data_hub_ttrpc;
 
 #[cfg(feature = "async")]
 pub mod confidential_data_hub_ttrpc_async;
-
-// Æther Agent proto modules
-pub mod aether;
-pub mod aether_ttrpc;
-#[cfg(feature = "async")]
-pub mod aether_ttrpc_async;

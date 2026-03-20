@@ -217,10 +217,6 @@ fn real_main() -> Result<(), std::io::Error> {
             "src/confidential_data_hub_ttrpc_async.rs",
         )?;
         fs::rename("src/remote_ttrpc.rs", "src/remote_ttrpc_async.rs")?;
-
-        // Æther Agent: generate async ttrpc service for aether.proto
-        codegen("src", &["protos/aether.proto"], true)?;
-        fs::rename("src/aether_ttrpc.rs", "src/aether_ttrpc_async.rs")?;
     }
 
     codegen(
@@ -233,9 +229,6 @@ fn real_main() -> Result<(), std::io::Error> {
         ],
         false,
     )?;
-
-    // Æther Agent: generate sync ttrpc service for aether.proto
-    codegen("src", &["protos/aether.proto"], false)?;
 
     codegen("src", &["protos/cri-api/api.proto"], false)?;
 

@@ -1,11 +1,19 @@
-// AgentFS — the root filesystem for machines running in Æther.
+// Æther Agent FUSE overlay.
 //
-// FUSE IS the filesystem. Three layers, top wins:
+// Mounts over directories like /usr/bin, /usr/lib, /opt.
+// Snapshots the real contents first, then serves them through FUSE.
+// New files can be added (eager or lazy). Writes go to a real
+// ext4 directory via a bypass fd.
 //
-//   Writable  — writes from inside the machine land here
-//   Add-ins   — files pushed in by Shimmer from outside
-//   Base      — the golden image directory
+// From the outside (Shimmer):
+//   - CopyFile to /usr/bin/gh → bytes land in writable layer via FUSE
+//   - Register lazy entry → file appears instantly, bytes come on first read
 //
-// Shimmer puts files in. Processes inside read them. That's it.
+// From the inside (processes):
+//   - ls /usr/bin → sees base files + added files
+//   - cat /usr/bin/gh → served from FUSE (lazy fetch if needed)
+//   - pip install foo → writes go to writable layer
+//
+// If the agent dies, FUSE unmounts and the real directory reappears.
 
-pub mod fs;
+pub mod overlay;

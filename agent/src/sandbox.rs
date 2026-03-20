@@ -136,10 +136,6 @@ pub struct Sandbox {
     pub bind_watcher: BindWatcher,
     pub pcimap: HashMap<String, PciHostGuestMapping>,
     pub devcg_info: Arc<RwLock<DevicesCgroupInfo>>,
-
-    // ── Æther Agent ──
-    /// The filesystem. Shimmer puts files in from outside, processes read them inside.
-    pub agentfs: Arc<aether_fs::fs::AgentFs>,
 }
 
 impl Sandbox {
@@ -149,13 +145,6 @@ impl Sandbox {
         let logger = logger.new(o!("subsystem" => "sandbox"));
         let (tx, rx) = channel::<String>(100);
         let event_rx = Arc::new(Mutex::new(rx));
-
-        // Æther Agent: create the filesystem.
-        // Base layer = host root. Writable layer = tmpfs.
-        let agentfs = Arc::new(aether_fs::fs::AgentFs::new(
-            std::path::Path::new("/"),
-            std::path::Path::new("/run/aether/writable"),
-        ));
 
         Ok(Sandbox {
             logger: logger.clone(),
@@ -181,7 +170,6 @@ impl Sandbox {
             bind_watcher: BindWatcher::new(),
             pcimap: HashMap::new(),
             devcg_info: Arc::new(RwLock::new(DevicesCgroupInfo::default())),
-            agentfs,
         })
     }
 
