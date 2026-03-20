@@ -403,44 +403,20 @@ async fn start_sandbox(
 
     tasks.push(uevents_handler_task);
 
-    // Æther Agent: start the watchdog that monitors agent health.
-    // Checks: registry lock, manifest dir, ttrpc heartbeat, /dev/watchdog.
-    let watchdog_task = tokio::spawn(aether_watchdog::run_watchdog(
-        logger.clone(),
-        sandbox.clone(),
-        shutdown.clone(),
-    ));
-    tasks.push(watchdog_task);
+    // ── Æther Agent boot sequence ──
+    //
+    // 1. Mount AgentFS as FUSE (the filesystem)
+    // 2. Open ttrpc socket
+    // 3. Start ttrpc server (Shimmer can now connect)
+    // 4. Start supervisor (reap zombies, pet /dev/watchdog)
+    // 5. Wait for shutdown signal
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    sandbox.lock().await.sender = Some(tx);
+    // Step 1: AgentFS is created in Sandbox::new() and ready.
+    // FUSE mount will happen here when fuser is wired in.
+    // For now, AgentFS is in-memory and served via ttrpc.
+    info!(logger, "Æther: AgentFS ready");
 
-    let initdata_return_value = initdata::initialize_initdata(logger).await?;
-
-    let gc_procs = config.guest_components_procs;
-    if !attestation_binaries_available(logger, &gc_procs) {
-        warn!(
-            logger,
-            "attestation binaries requested for launch not available"
-        );
-    } else {
-        init_attestation_components(logger, config, &initdata_return_value).await?;
-    }
-
-    // if policy is given via initdata, use it
-    #[cfg(feature = "agent-policy")]
-    if let Some(initdata_return_value) = initdata_return_value {
-        if let Some(policy) = &initdata_return_value._policy {
-            info!(logger, "using policy from initdata");
-            AGENT_POLICY
-                .lock()
-                .await
-                .set_policy(policy)
-                .await
-                .context("Failed to set policy from initdata")?;
-        }
-    }
-
+    // Step 2-3: Start the ttrpc server (Shimmer talks to this)
     let mut oma = None;
     let mut _ort = None;
     if let Some(c) = &config.mem_agent {
@@ -455,12 +431,46 @@ async fn start_sandbox(
         _ort = Some(rt);
     }
 
-    // vsock:///dev/vsock, port
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    sandbox.lock().await.sender = Some(tx);
+
     let mut server =
         rpc::start(sandbox.clone(), config.server_addr.as_str(), init_mode, oma).await?;
-
     server.start().await?;
+    info!(logger, "Æther: ttrpc server ready — Shimmer can connect");
 
+    // Step 4: Start supervisor (reap zombies, pet watchdog)
+    let supervisor_task = tokio::spawn(aether_watchdog::run_supervisor(
+        logger.clone(),
+        sandbox.clone(),
+        shutdown.clone(),
+    ));
+    tasks.push(supervisor_task);
+
+    // Attestation components (kept from Kata for compatibility)
+    let initdata_return_value = initdata::initialize_initdata(logger).await?;
+    let gc_procs = config.guest_components_procs;
+    if !attestation_binaries_available(logger, &gc_procs) {
+        warn!(logger, "attestation binaries requested for launch not available");
+    } else {
+        init_attestation_components(logger, config, &initdata_return_value).await?;
+    }
+
+    #[cfg(feature = "agent-policy")]
+    if let Some(initdata_return_value) = initdata_return_value {
+        if let Some(policy) = &initdata_return_value._policy {
+            info!(logger, "using policy from initdata");
+            AGENT_POLICY
+                .lock()
+                .await
+                .set_policy(policy)
+                .await
+                .context("Failed to set policy from initdata")?;
+        }
+    }
+
+    // Step 5: Wait for shutdown
+    info!(logger, "Æther Agent running");
     rx.await?;
     server.shutdown().await?;
 
