@@ -1,6 +1,3 @@
-.gitignore
-target/
-*.o
-*.so
-*.dylib
+dist/
+*.exe
 .DS_Store
