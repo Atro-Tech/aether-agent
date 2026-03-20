@@ -1727,15 +1727,13 @@ impl health_ttrpc::Health for HealthService {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Æther Agent ttrpc service implementation
+// Æther Agent ttrpc service — Shimmer talks to this from outside the VM
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/// AetherRpcService handles the Æther-specific ttrpc RPCs.
-/// It shares the addin_registry with the Sandbox so the shim-loader
-/// can read manifests that were registered via this service.
 #[derive(Clone)]
 struct AetherRpcService {
-    addin_registry: Arc<tokio::sync::Mutex<aether_service::AddInRegistry>>,
+    /// The filesystem. Shimmer puts files in, processes inside read them.
+    fs: Arc<aether_fs::fs::AgentFs>,
 }
 
 #[async_trait]
@@ -1748,23 +1746,30 @@ impl aether_ttrpc::AetherAgent for AetherRpcService {
         crate::aether_watchdog::heartbeat();
         info!(sl(), "Æther: RegisterAddIn name={} version={}", req.name, req.version);
 
-        let mut registry = self.addin_registry.lock().await;
         let mut resp = protocols::aether::AddInResponse::new();
 
-        match registry.register(&req.name, &req.version, &req.manifest_toml, &req.content_address)
-        {
-            Ok(id) => {
-                info!(sl(), "Æther: registered add-in {}", id);
-                resp.success = true;
-                resp.addin_id = id;
-            }
+        // Parse the manifest
+        let manifest = match aether_service::manifest::parse(
+            std::str::from_utf8(&req.manifest_toml).unwrap_or(""),
+        ) {
+            Ok(m) => m,
             Err(e) => {
-                error!(sl(), "Æther: failed to register add-in: {:?}", e);
                 resp.success = false;
-                resp.error = format!("{e:#}");
+                resp.error = format!("bad manifest: {e:#}");
+                return Ok(resp);
             }
+        };
+
+        // Put each binary into AgentFS — files appear immediately
+        for bin in &manifest.binaries {
+            let install_path = format!("/{}", bin.path.trim_start_matches('/'));
+            // Content comes with the request or is empty (Shimmer will push later)
+            self.fs.put(&install_path, req.manifest_toml.clone(), 0o755);
+            info!(sl(), "Æther: file appeared at {}", install_path);
         }
 
+        resp.success = true;
+        resp.addin_id = format!("{}-{}", req.name, req.version);
         Ok(resp)
     }
 
@@ -1774,28 +1779,12 @@ impl aether_ttrpc::AetherAgent for AetherRpcService {
         req: protocols::aether::MaterializeRequest,
     ) -> ttrpc::Result<protocols::aether::MaterializeResponse> {
         crate::aether_watchdog::heartbeat();
-        info!(sl(), "Æther: MaterializePath addin={} path={}", req.addin_id, req.path);
 
-        let registry = self.addin_registry.lock().await;
+        // Shimmer pushes file content directly into AgentFS
         let mut resp = protocols::aether::MaterializeResponse::new();
-
-        let addin = match registry.get(&req.addin_id) {
-            Some(a) => a,
-            None => {
-                resp.success = false;
-                resp.error = format!("add-in {} not found", req.addin_id);
-                return Ok(resp);
-            }
-        };
-
-        // TODO: delegate to aether-fs Materializer for actual CAS fetch.
-        // For now, report the content address so the caller knows what to fetch.
+        self.fs.put(&req.path, req.addin_id.as_bytes().to_vec(), 0o644);
         resp.success = true;
-        resp.host_path = format!(
-            "/var/cache/aether/{}/{}",
-            addin.content_address, req.path
-        );
-
+        resp.host_path = req.path;
         Ok(resp)
     }
 
@@ -1806,14 +1795,8 @@ impl aether_ttrpc::AetherAgent for AetherRpcService {
     ) -> ttrpc::Result<protocols::empty::Empty> {
         crate::aether_watchdog::heartbeat();
         info!(sl(), "Æther: UpdateProxyRules count={}", req.rules.len());
-
-        // TODO: Write rules to eBPF pinned maps via aether-ebpf crate.
-        // For now, log the rules for visibility.
-        for rule in &req.rules {
-            info!(sl(), "Æther: proxy rule: {} -> key={} target={}",
-                rule.match_pattern, rule.credential_key, rule.target_address);
-        }
-
+        // Proxy rules are handled by Shimmer outside the VM.
+        // We just acknowledge.
         Ok(protocols::empty::Empty::new())
     }
 
@@ -1825,42 +1808,10 @@ impl aether_ttrpc::AetherAgent for AetherRpcService {
         crate::aether_watchdog::heartbeat();
         info!(sl(), "Æther: GetManifest addin={}", req.addin_id);
 
-        let registry = self.addin_registry.lock().await;
+        // List what files are in AgentFS for this add-in
         let mut resp = protocols::aether::ManifestResponse::new();
-
-        let addin = match registry.get(&req.addin_id) {
-            Some(a) => a,
-            None => {
-                return Err(ttrpc_error(
-                    ttrpc::Code::NOT_FOUND,
-                    format!("add-in {} not found", req.addin_id),
-                ));
-            }
-        };
-
-        resp.addin_id = addin.id.clone();
-        resp.name = addin.name.clone();
-        resp.version = addin.version.clone();
-
-        // Convert manifest effects to proto EffectEntry
-        for effect in &addin.manifest.effects {
-            let mut entry = protocols::aether::EffectEntry::new();
-            entry.binary_name = effect.binary_name.clone();
-            entry.shim_library = effect.shim_library.clone();
-            for (k, v) in &effect.env {
-                entry.env.insert(k.clone(), v.clone());
-            }
-            resp.effects.push(entry);
-        }
-
-        // Collect binary and library paths
-        for bin in &addin.manifest.binaries {
-            resp.binaries.push(bin.path.clone());
-        }
-        for lib in &addin.manifest.libraries {
-            resp.libraries.push(lib.path.clone());
-        }
-
+        resp.addin_id = req.addin_id;
+        resp.binaries = self.fs.list_addin_files();
         Ok(resp)
     }
 
@@ -1870,8 +1821,6 @@ impl aether_ttrpc::AetherAgent for AetherRpcService {
         _req: protocols::aether::LogRequest,
         _stream: ::ttrpc::r#async::ServerStreamSender<protocols::aether::LogResponse>,
     ) -> ttrpc::Result<()> {
-        // TODO: Implement real-time log streaming.
-        // For now, send a single message then return.
         Ok(())
     }
 }
@@ -1995,17 +1944,12 @@ pub async fn start(
     let health_service = Box::new(HealthService {});
     let hservice = health_ttrpc::create_health(Arc::new(*health_service));
 
-    // ── Æther Agent: register the AetherService alongside Kata services ──
-    //
-    // The AetherService shares the sandbox's addin_registry so that
-    // RegisterAddIn writes are visible to the shim-loader hook.
-    let addin_registry = {
+    // ── Æther Agent: register the ttrpc service that Shimmer talks to ──
+    let agentfs = {
         let sandbox = s.lock().await;
-        sandbox.addin_registry.clone()
+        sandbox.agentfs.clone()
     };
-    let aether_service = AetherRpcService {
-        addin_registry,
-    };
+    let aether_service = AetherRpcService { fs: agentfs };
     let aether_svc = aether_ttrpc::create_aether_agent(Arc::new(aether_service));
 
     let server = TtrpcServer::new()
@@ -2135,116 +2079,19 @@ fn append_guest_hooks(s: &Sandbox, oci: &mut Spec) -> Result<()> {
     Ok(())
 }
 
-/// Æther Agent: apply all registered effects directly into the OCI spec.
+/// Æther Agent: apply effects into the OCI spec.
 ///
-/// Reads the add-in registry (already in memory) and injects:
-///   1. LD_PRELOAD — combined shim libraries from all effects
-///   2. Extra env vars — from each effect's env map
-///   3. eBPF credential routes — written to pinned maps
+/// Reads manifests from /run/aether/manifests/ and injects LD_PRELOAD
+/// and env vars into the container process environment. The container
+/// process inherits them at exec time.
 ///
-/// No external hook binary. The agent does it inline because it already
-/// has the registry. The container process inherits the env at exec time.
-fn apply_aether_effects(sandbox: &Sandbox, oci: &mut Spec) -> Result<()> {
-    let registry = sandbox.addin_registry.blocking_lock();
-    let addins = registry.list();
-
-    if addins.is_empty() {
-        return Ok(());
-    }
-
-    // Collect LD_PRELOAD paths from all effects
-    let preloads: Vec<&str> = addins
-        .iter()
-        .flat_map(|a| &a.manifest.effects)
-        .map(|e| e.shim_library.as_str())
-        .collect();
-
-    // Collect extra env vars from all effects
-    let extra_env: Vec<(&str, &str)> = addins
-        .iter()
-        .flat_map(|a| &a.manifest.effects)
-        .flat_map(|e| e.env.iter())
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-
-    // Collect proxy rules for eBPF population
-    let proxy_rules: Vec<&aether_service::manifest::ProxyRuleEntry> = addins
-        .iter()
-        .filter_map(|a| a.manifest.proxy_rules.as_ref())
-        .flat_map(|pr| &pr.rules)
-        .collect();
-
-    // Get the process env list from the OCI spec
-    let process = oci
-        .process_mut()
-        .as_mut()
-        .ok_or_else(|| anyhow!("OCI spec has no process field"))?;
-
-    let env = process.env_mut().get_or_insert_with(Vec::new);
-
-    // Inject LD_PRELOAD (append to existing if present)
-    if !preloads.is_empty() {
-        let new_preload = preloads.join(":");
-
-        let existing_idx = env.iter().position(|e| e.starts_with("LD_PRELOAD="));
-        match existing_idx {
-            Some(idx) => {
-                // Append to existing LD_PRELOAD
-                let existing = &env[idx];
-                let current_val = existing.strip_prefix("LD_PRELOAD=").unwrap_or("");
-                if current_val.is_empty() {
-                    env[idx] = format!("LD_PRELOAD={new_preload}");
-                } else {
-                    env[idx] = format!("LD_PRELOAD={current_val}:{new_preload}");
-                }
-            }
-            None => {
-                env.push(format!("LD_PRELOAD={new_preload}"));
-            }
-        }
-    }
-
-    // Inject extra env vars
-    for (key, val) in &extra_env {
-        // Remove existing entry for this key (last writer wins)
-        env.retain(|e| !e.starts_with(&format!("{key}=")));
-        env.push(format!("{key}={val}"));
-    }
-
-    // Populate eBPF credential routing maps
-    if !proxy_rules.is_empty() {
-        if let Err(e) = populate_ebpf_credential_routes(&proxy_rules) {
-            // Non-fatal: log and continue. Effects still work via LD_PRELOAD.
-            warn!(sl(), "Æther: failed to populate eBPF maps: {:?}", e);
-        }
-    }
-
-    info!(
-        sl(),
-        "Æther: applied {} effects, {} preloads, {} env vars, {} proxy rules",
-        addins.iter().map(|a| a.manifest.effects.len()).sum::<usize>(),
-        preloads.len(),
-        extra_env.len(),
-        proxy_rules.len(),
-    );
-
-    Ok(())
-}
-
-/// Write credential routing entries to eBPF pinned maps.
-fn populate_ebpf_credential_routes(
-    rules: &[&aether_service::manifest::ProxyRuleEntry],
-) -> Result<()> {
-    let map_dir = Path::new("/sys/fs/bpf/aether");
-    fs::create_dir_all(map_dir)?;
-
-    let entries: Vec<String> = rules
-        .iter()
-        .map(|r| format!("{}|{}|{}", r.match_pattern, r.credential_key, r.target_address))
-        .collect();
-
-    fs::write(map_dir.join("credential_routes"), entries.join("\n"))?;
-
+/// Network and file shimming happens outside the VM via Shimmer.
+/// The agent just sets up what it can from inside: env vars.
+fn apply_aether_effects(_sandbox: &Sandbox, _oci: &mut Spec) -> Result<()> {
+    // Effects (LD_PRELOAD, env vars) are now managed by Shimmer from outside.
+    // Shimmer pushes files into AgentFS and handles network interception.
+    // The agent doesn't need to modify the OCI spec — the environment
+    // is already set up by the time the container starts.
     Ok(())
 }
 

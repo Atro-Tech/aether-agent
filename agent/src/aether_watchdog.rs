@@ -110,29 +110,15 @@ async fn run_health_checks(
     Ok(())
 }
 
-/// Check that the addin_registry lock is acquirable within a timeout.
+/// Check that the sandbox lock is acquirable within a timeout.
 /// If this hangs, something is deadlocked.
 async fn check_registry_lock(sandbox: &Arc<Mutex<Sandbox>>) -> Result<()> {
     let lock_result = tokio::time::timeout(LOCK_TIMEOUT, sandbox.lock()).await;
 
-    let sandbox_guard = match lock_result {
-        Ok(guard) => guard,
-        Err(_) => {
-            anyhow::bail!("sandbox lock timed out after {:?} — possible deadlock", LOCK_TIMEOUT);
-        }
-    };
-
-    // Also check the inner addin_registry lock
-    let registry_result =
-        tokio::time::timeout(LOCK_TIMEOUT, sandbox_guard.addin_registry.lock()).await;
-
-    match registry_result {
+    match lock_result {
         Ok(_guard) => Ok(()),
         Err(_) => {
-            anyhow::bail!(
-                "addin_registry lock timed out after {:?} — possible deadlock",
-                LOCK_TIMEOUT
-            );
+            anyhow::bail!("sandbox lock timed out after {:?} — possible deadlock", LOCK_TIMEOUT);
         }
     }
 }

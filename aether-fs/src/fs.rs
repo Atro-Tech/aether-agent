@@ -35,6 +35,15 @@ pub struct AgentFs {
     writable_dir: PathBuf,
 }
 
+impl std::fmt::Debug for AgentFs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentFs")
+            .field("base_dir", &self.base_dir)
+            .field("writable_dir", &self.writable_dir)
+            .finish()
+    }
+}
+
 impl AgentFs {
     pub fn new(base_dir: &Path, writable_dir: &Path) -> Self {
         std::fs::create_dir_all(writable_dir).ok();

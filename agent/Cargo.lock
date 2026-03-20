@@ -18,17 +18,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "512761e0bb2578dd7380c6baaa0f4ce03e84f95e960231d1dec8bf4d7d6e2627"
 
 [[package]]
-name = "aether-service"
-version = "0.1.0"
+name = "aether-fs"
+version = "0.3.0"
 dependencies = [
  "anyhow",
- "hex",
+]
+
+[[package]]
+name = "aether-service"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
  "serde",
  "serde_json",
- "sha2 0.10.9",
- "slog",
- "slog-scope",
- "tokio",
  "toml 0.8.22",
 ]
 
@@ -2042,6 +2044,7 @@ dependencies = [
 name = "kata-agent"
 version = "0.1.0"
 dependencies = [
+ "aether-fs",
  "aether-service",
  "anyhow",
  "async-compression",

@@ -137,10 +137,9 @@ pub struct Sandbox {
     pub pcimap: HashMap<String, PciHostGuestMapping>,
     pub devcg_info: Arc<RwLock<DevicesCgroupInfo>>,
 
-    // ── Æther Agent extensions ──
-    /// Registry of add-in packages and their effect manifests.
-    /// Shared with AetherService (ttrpc handler) and the shim-loader.
-    pub addin_registry: Arc<tokio::sync::Mutex<aether_service::AddInRegistry>>,
+    // ── Æther Agent ──
+    /// The filesystem. Shimmer puts files in from outside, processes read them inside.
+    pub agentfs: Arc<aether_fs::fs::AgentFs>,
 }
 
 impl Sandbox {
@@ -151,11 +150,11 @@ impl Sandbox {
         let (tx, rx) = channel::<String>(100);
         let event_rx = Arc::new(Mutex::new(rx));
 
-        // Æther Agent: create the shared add-in registry.
-        // Manifests are written to /run/aether/manifests/ for the shim-loader.
-        let manifest_dir = std::path::Path::new("/run/aether/manifests");
-        let addin_registry = Arc::new(tokio::sync::Mutex::new(
-            aether_service::AddInRegistry::new(manifest_dir),
+        // Æther Agent: create the filesystem.
+        // Base layer = host root. Writable layer = tmpfs.
+        let agentfs = Arc::new(aether_fs::fs::AgentFs::new(
+            std::path::Path::new("/"),
+            std::path::Path::new("/run/aether/writable"),
         ));
 
         Ok(Sandbox {
@@ -182,7 +181,7 @@ impl Sandbox {
             bind_watcher: BindWatcher::new(),
             pcimap: HashMap::new(),
             devcg_info: Arc::new(RwLock::new(DevicesCgroupInfo::default())),
-            addin_registry,
+            agentfs,
         })
     }
 

@@ -97,6 +97,7 @@ runtime-spec = { path = "../runtime-spec" }
 safe-path = { path = "../safe-path" }
 test-utils = { path = "../test-utils" }
 aether-service = { path = "../aether-service" }
+aether-fs = { path = "../aether-fs" }
 
 
 [package]
@@ -182,6 +183,7 @@ safe-path.workspace = true
 logging.workspace = true
 vsock-exporter.workspace = true
 aether-service.workspace = true
+aether-fs.workspace = true
 
 # Initdata
 base64 = "0.22"
