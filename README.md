@@ -1,131 +1,173 @@
 # Æther Agent
 
-An Agentic Operating Environment (AOE) that runs AI tool-use in isolated contexts with credential hallucination, lazy binary materialization, and real-time file I/O monitoring.
+A daemon that runs inside sandboxed VMs (Sprites, E2B) and exposes the filesystem and network as programmable gates. Shimmer — your control plane — pushes files in, configures network rules, and manages tools. Processes inside see a normal Linux environment.
 
-Forked from the [Kata Containers](https://github.com/kata-containers/kata-containers) Rust agent. All Kata functionality is preserved.
+Tested and running on [Sprites](https://sprites.dev) (Fly.io Firecracker VMs).
 
-## Architecture
+## How It Works
 
 ```
-                    Control Plane (Go / Elixir)
-                           |
-                      ttrpc / vsock
-                           |
-                    ┌──────┴──────┐
-                    │ Æther Agent │
-                    │  (Rust)     │
-                    └──────┬──────┘
-                           │
-          ┌────────────────┼────────────────┐
-          │                │                │
-    ┌─────┴─────┐   ┌─────┴─────┐   ┌─────┴─────┐
-    │  Effects   │   │  AgentFS  │   │  Shimmer   │
-    │ LD_PRELOAD │   │   FUSE    │   │   eBPF     │
-    │  + eBPF    │   │  lazy CAS │   │  file I/O  │
-    └───────────┘   └───────────┘   └───────────┘
+Outside the VM (Shimmer / your control plane)
+    │
+    ├─ ttrpc ──────────► aether-agent (daemon inside the VM)
+    │                         │
+    │                         ├── AgentFS: files appear when Shimmer puts them
+    │                         ├── Network: eBPF on spr0, rules from Shimmer
+    │                         └── context.json: agents inside know what tools exist
+    │
+    └─ eBPF TC on spr0 ──► all traffic intercepted at kernel level
 ```
 
-### Core Concepts
+The agent doesn't fetch files. It doesn't decide what tools to install. It doesn't manage credentials. Shimmer does all of that from outside. The agent is the gate — it accepts what Shimmer pushes and presents it to processes inside.
 
-**Effects** are the core illusion unit. Each add-in package declares effects that map binary names to LD_PRELOAD shims and eBPF credential routing rules. When a container runs `gh`, the effect swaps a placeholder token for a real GitHub credential — the process never sees the real secret.
-
-**Layer 0** is host-native by default: Linux namespaces + bubblewrap for speed and native compatibility. Pluggable backends (Firecracker/Kata, gVisor) are selectable per add-in for stronger isolation.
-
-**AgentFS** is a FUSE filesystem that lazily materializes package binaries on first access. A 2GB Playwright browser bundle is never fetched unless Playwright actually runs. Writable overlays support dynamic `pip install` / `npm install` with artifact extraction.
-
-**Shimmer** monitors file I/O in real-time using eBPF (Falco/Tetragon style). Each file access gets a confidence score (0-100) with allow/alert/block actions.
-
-## Quick Start
+## Quick Start (Sprites)
 
 ```bash
-# Build the agent
-cargo build --release
+# Install Sprites CLI
+curl https://sprites.dev/install.sh | bash
+sprite login
 
-# Build the shim-loader
-cargo build --release -p aether-shim
+# Create a Sprite
+sprite create -o your-org my-sandbox
 
-# Register an add-in (example: GitHub CLI)
-# via ttrpc client or the Go/Elixir control-plane library
+# Install the agent
+sprite exec -s my-sandbox -- sh -c '
+  curl -fsSL -o /tmp/aether-agent \
+    "https://github.com/Atro-Tech/aether-agent/raw/main/dist/linux-x86_64/aether-agent"
+  sudo cp /tmp/aether-agent /usr/bin/aether-agent
+  sudo chmod +x /usr/bin/aether-agent
+  sudo mkdir -p /run/aether
+  sudo mount -t bpf bpf /sys/fs/bpf
+'
+
+# Start the agent
+sprite exec -s my-sandbox -- sudo sh -c '
+  KATA_AGENT_SERVER_ADDR=unix:///run/aether/agent.sock \
+  nohup /usr/bin/aether-agent > /tmp/aether.log 2>&1 &
+'
+
+# Checkpoint it (golden image — every restore boots with aether ready)
+sprite checkpoint create -s my-sandbox
 ```
 
-## Add-In Packages
+## Connect via ttrpc
 
-Each package has a TOML manifest in `packages/`:
+```go
+conn, _ := net.Dial("unix", "/run/aether/agent.sock")
+client := ttrpc.NewClient(conn)
 
-| Package | Description | Credential Key |
-|---------|-------------|----------------|
-| `gh` | GitHub CLI | `gh-token` |
-| `rclone-dropbox` | rclone for Dropbox | `dropbox-oauth` |
-| `playwright` | Browser automation | (none) |
-| `python-excel` | Python + openpyxl | (none) |
-| `imap-scraper` | IMAP email scraper | `imap-password` |
+// Put a file — it appears in the filesystem immediately
+client.Call(ctx, "aether.AetherAgent", "RegisterAddIn", req, resp)
 
-### Manifest Format
-
-```toml
-[package]
-name = "gh"
-version = "2.62.0"
-description = "GitHub CLI with credential hallucination"
-content_address = "sha256:..."
-
-[[effects]]
-binary_name = "gh"
-shim_library = "/usr/lib/aether/shims/libgh_shim.so"
-
-[effects.env]
-GITHUB_TOKEN_SOURCE = "ebpf:gh-token"
-
-[[binaries]]
-path = "bin/gh"
-source = "lazy"
-
-[proxy_rules]
-[[proxy_rules.rules]]
-match_pattern = "api.github.com"
-credential_key = "gh-token"
+// Configure network rules — eBPF enforces at kernel level
+client.Call(ctx, "aether.AetherAgent", "UpdateProxyRules", rules, resp)
 ```
 
-## API (aether.proto)
+## API (ttrpc)
 
-```protobuf
-service AetherAgent {
-    rpc RegisterAddIn(AddInRequest) returns (AddInResponse);
-    rpc MaterializePath(MaterializeRequest) returns (MaterializeResponse);
-    rpc UpdateProxyRules(ProxyRules) returns (Empty);
-    rpc GetManifest(GetManifestRequest) returns (ManifestResponse);
-    rpc StreamLogs(LogRequest) returns (stream LogResponse);
+Service: `aether.AetherAgent`
+
+| RPC | What it does |
+|-----|-------------|
+| `RegisterAddIn` | Push an add-in manifest + files into the VM |
+| `MaterializePath` | Push a file at a specific path |
+| `UpdateProxyRules` | Configure credential routing for eBPF network interception |
+| `GetManifest` | List files the agent knows about |
+| `StreamLogs` | Stream logs from inside |
+
+Proto definition: [`protocols/protos/aether.proto`](protocols/protos/aether.proto)
+
+## What the Agent Does at Boot
+
+```
+1. AgentFS ready (filesystem accepts file pushes)
+2. Network interceptor: detect spr0, attach TC clsact qdisc
+3. ttrpc server starts on unix:///run/aether/agent.sock
+4. Supervisor starts (heartbeat, watchdog)
+5. Ready — Shimmer can connect
+```
+
+## AgentFS (Layer 3)
+
+FUSE IS the filesystem. Three layers, top wins:
+
+```
+┌─────────────────────────────┐
+│ Writable   — writes from    │ ← pip install lands here
+│              inside          │
+├─────────────────────────────┤
+│ Add-ins    — pushed by      │ ← Shimmer puts /usr/bin/gh
+│              Shimmer         │   and it just appears
+├─────────────────────────────┤
+│ Base       — golden image   │ ← /bin/sh, /usr/bin/python3
+└─────────────────────────────┘
+```
+
+Shimmer calls `put("/usr/bin/gh", bytes, 0o755)` → file appears.
+Shimmer calls `remove("/usr/bin/gh")` → file disappears.
+Processes inside see a normal Linux filesystem.
+
+## Network (Layer 2)
+
+eBPF TC programs attach to the VM's network interface (`spr0` on Sprites). All traffic passes through. Shimmer configures credential routing rules via ttrpc → BPF maps.
+
+Confirmed working on Sprites:
+- Kernel 6.12.47-fly with full BPF support
+- `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` available
+- BPF map creation works
+- TC clsact qdisc attachment works
+
+## Context (for agents inside)
+
+`/run/aether/context.json` tells the agent inside what tools it has:
+
+```json
+{
+  "version": "1",
+  "request_tools": {
+    "ttrpc_socket": "unix:///run/aether/agent.sock",
+    "request_file": "/run/aether/requests/tool_request.json"
+  },
+  "tools": [
+    {
+      "command": "gh",
+      "path": "/usr/bin/gh",
+      "addin": "gh-abc123",
+      "tool_type": "hybrid",
+      "capabilities": ["git", "pr", "issue"]
+    }
+  ]
 }
 ```
+
+The add-in defines what metadata to include. Æther passes it through.
 
 ## Project Structure
 
 ```
 aether-agent/
-├── agent/              # Forked Kata agent (modified: rpc.rs, sandbox.rs, main.rs)
-├── protocols/          # Proto definitions + codegen (aether.proto added)
-├── aether-service/     # Add-in registry, manifest parsing, context file
-├── aether-ebpf/        # Hallucinator probe + Shimmer file I/O monitor
-├── aether-fs/          # AgentFS — the root filesystem (base + add-in + writable layers)
-├── packages/           # Default add-in manifests (5 packages)
-└── clients/            # Control-plane clients (Go + Elixir)
+├── agent/              # Daemon (forked Kata agent, Rust)
+│   └── src/
+│       ├── main.rs         # Boot sequence
+│       ├── rpc.rs          # ttrpc handlers (Shimmer talks to these)
+│       ├── aether_net.rs   # eBPF network interceptor setup
+│       └── aether_watchdog.rs  # Supervisor
+├── aether-fs/          # AgentFS — the filesystem (put/remove/read/write)
+├── aether-service/     # Manifest parsing + context.json
+├── protocols/          # aether.proto + generated ttrpc code
+├── packages/           # Example add-in manifests
+├── clients/            # Go + Elixir client stubs
+├── spec/               # Interop spec for Sprites/E2B integration
+└── dist/               # Pre-built Linux x86_64 binary (14MB, static musl)
 ```
 
-## How Effects Work
+## Tested On
 
-1. Control plane calls `RegisterAddIn` with a package manifest
-2. Agent stores the manifest in its in-memory registry
-3. Agent updates `/run/aether/context.json` (so the in-sandbox agent knows what tools exist)
-4. Container is created — the agent applies effects inline:
-   - Injects `LD_PRELOAD` with shim libraries directly into the OCI process env
-   - Injects extra env vars from each effect
-   - Populates eBPF pinned maps with credential routing rules
-5. Container process starts with effects already active in its environment
-6. Outbound connections hit the eBPF hallucinator, which swaps credentials
-7. File access is scored by Shimmer (allow/alert/block)
+| Platform | Status |
+|----------|--------|
+| Sprites (Fly.io) | Working — booted, ttrpc connected, RPCs responding |
+| E2B | Architecture compatible (Firecracker + virtio-net) |
 
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE).
-
-This project is a derivative of [Kata Containers](https://github.com/kata-containers/kata-containers), which is also Apache 2.0 licensed.
+Apache 2.0. Forked from [Kata Containers](https://github.com/kata-containers/kata-containers).
