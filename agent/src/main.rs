@@ -79,6 +79,7 @@ use tokio::{
     task::JoinHandle,
 };
 
+mod aether_net;
 mod aether_watchdog;
 mod rpc;
 mod tracer;
@@ -415,6 +416,12 @@ async fn start_sandbox(
     // FUSE mount will happen here when fuser is wired in.
     // For now, AgentFS is in-memory and served via ttrpc.
     info!(logger, "Æther: AgentFS ready");
+
+    // Step 1.5: Set up network interceptor (eBPF TC on spr0/eth0).
+    // Detects the interface, attaches clsact qdisc, creates BPF pin dir.
+    if let Err(e) = aether_net::setup(logger) {
+        warn!(logger, "Æther: network setup failed (non-fatal): {:?}", e);
+    }
 
     // Step 2-3: Start the ttrpc server (Shimmer talks to this)
     let mut oma = None;

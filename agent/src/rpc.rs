@@ -1795,8 +1795,20 @@ impl aether_ttrpc::AetherAgent for AetherRpcService {
     ) -> ttrpc::Result<protocols::empty::Empty> {
         crate::aether_watchdog::heartbeat();
         info!(sl(), "Æther: UpdateProxyRules count={}", req.rules.len());
-        // Proxy rules are handled by Shimmer outside the VM.
-        // We just acknowledge.
+
+        // Write credential routing rules to BPF maps.
+        // The eBPF TC program on spr0/eth0 reads these.
+        let _ = crate::aether_net::clear_credential_routes();
+        for rule in &req.rules {
+            if let Err(e) = crate::aether_net::set_credential_route(
+                &rule.match_pattern,
+                &rule.credential_key,
+                &rule.target_address,
+            ) {
+                error!(sl(), "Æther: failed to set route: {:?}", e);
+            }
+        }
+
         Ok(protocols::empty::Empty::new())
     }
 
