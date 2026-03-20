@@ -15,9 +15,11 @@ require (
 	github.com/e2b-dev/fsnotify v0.0.1
 	github.com/go-chi/chi/v5 v5.2.2
 	github.com/google/uuid v1.6.0
+	github.com/hanwen/go-fuse/v2 v2.9.0
 	github.com/rs/cors v1.11.1
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/net v0.50.0
 	golang.org/x/sys v0.41.0
 	google.golang.org/protobuf v1.36.11
 )
