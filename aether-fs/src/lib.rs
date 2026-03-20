@@ -1,25 +1,11 @@
-// Copyright 2024 The Æther Agent Authors
-// SPDX-License-Identifier: Apache-2.0
+// AgentFS — the root filesystem for machines running in Æther.
 //
-// AgentFS: the root filesystem for Æther Agent execution contexts.
+// FUSE IS the filesystem. Three layers, top wins:
 //
-// FUSE IS the filesystem. Not a volume. Not a sidecar.
+//   Writable  — writes from inside the machine land here
+//   Add-ins   — files pushed in by Shimmer from outside
+//   Base      — the golden image directory
 //
-// Three layers, resolved top-down:
-//
-//   ┌─────────────────────────────────┐
-//   │  Writable Layer (tmpfs)         │  ← writes from inside the machine
-//   ├─────────────────────────────────┤
-//   │  Add-in Layers                  │  ← pushed in by the control plane
-//   │  /usr/bin/gh just appears       │    from object storage (S3/R2/GCS)
-//   ├─────────────────────────────────┤
-//   │  Base Template (read-only)      │  ← the golden image directory
-//   └─────────────────────────────────┘
-//
-// The agent never fetches files. The control plane reads from object
-// storage and pushes bytes into AgentFS. Files just appear.
-// This is outside-in, not inside-out.
+// Shimmer puts files in. Processes inside read them. That's it.
 
-pub mod layer;
-pub mod overlay;
-pub mod tree;
+pub mod fs;

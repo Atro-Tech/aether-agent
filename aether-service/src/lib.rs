@@ -1,13 +1,8 @@
-// Copyright 2024 The Æther Agent Authors
-// SPDX-License-Identifier: Apache-2.0
+// Æther Agent service.
 //
-// Æther Agent service crate.
-// Provides add-in registration, manifest parsing, context file,
-// and the registry that the ttrpc handler and shim-loader both depend on.
+// Two jobs:
+//   1. Parse add-in manifests (TOML → struct)
+//   2. Write context.json so the agent inside knows what tools it has
 
 pub mod context;
 pub mod manifest;
-pub mod registry;
-
-pub use manifest::Manifest;
-pub use registry::{AddInRegistry, RegisteredAddIn};

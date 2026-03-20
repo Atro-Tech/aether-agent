@@ -1,13 +1,12 @@
 [package]
 name = "aether-fs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "AgentFS — the root filesystem for Æther Agent. Stacks base template + add-in layers + writable overlay into one unified tree."
+description = "AgentFS — the root filesystem. FUSE. Three layers. Put files in, they appear."
 
 [dependencies]
 anyhow = "1"
-serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"
