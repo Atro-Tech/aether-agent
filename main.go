@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"time"
 
 	connectcors "connectrpc.com/cors"
@@ -105,6 +108,48 @@ func main() {
 
 	processLogger := l.With().Str("component", "process").Logger()
 	processRpc.Handle(m, &processLogger, defaults, nil)
+
+	// Simple unary exec endpoint for the reverse tunnel
+	m.Post("/exec", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Cmd  string            `json:"cmd"`
+			Args []string          `json:"args"`
+			Envs map[string]string `json:"envs"`
+			Cwd  string            `json:"cwd"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		cmd := exec.CommandContext(r.Context(), req.Cmd, req.Args...)
+		if req.Cwd != "" {
+			cmd.Dir = req.Cwd
+		}
+		for k, v := range req.Envs {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		if len(cmd.Env) > 0 {
+			cmd.Env = append(os.Environ(), cmd.Env...)
+		}
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		exitCode := 0
+		if err := cmd.Run(); err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				exitCode = ee.ExitCode()
+			} else {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"stdout":    stdout.String(),
+			"stderr":    stderr.String(),
+			"exit_code": exitCode,
+		})
+	})
 
 	s := &http.Server{
 		Handler:      withCORS(m),
