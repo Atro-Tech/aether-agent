@@ -54,8 +54,37 @@ func main() {
 
 	// ── Boot sequence ──
 
-	// 1. Mount FUSE at / (the filesystem)
-	fuse.Mount(&l)
+	// 1. Mount FUSE overlay
+	//
+	// We mount over /aether as a staging area. The overlay proxies
+	// the real root filesystem underneath and lets Shimmer inject
+	// virtual files on top. Processes that need the overlay access
+	// it through /aether (or we bind-mount specific paths later).
+	//
+	// We can't mount directly over / while the agent is running on it.
+	// The namespace root mount requires pivot_root from an initramfs,
+	// which Sprites doesn't support. So we mount at /aether and the
+	// overlay is accessible there.
+	var fuseOverlay *fuse.Overlay
+
+	fuseMountPoint := "/aether"
+	fuseLogger := l.With().Str("component", "fuse").Logger()
+
+	if err := os.MkdirAll(fuseMountPoint, 0o755); err != nil {
+		l.Warn().Err(err).Msg("failed to create FUSE mount point")
+	} else {
+		server, overlay, err := fuse.MountAt("/", fuseMountPoint, &fuseLogger)
+		if err != nil {
+			l.Warn().Err(err).Msg("FUSE mount failed (non-fatal)")
+		} else {
+			fuseOverlay = overlay
+			go server.Wait()
+			l.Info().Str("mount", fuseMountPoint).Msg("FUSE overlay mounted")
+		}
+	}
+
+	// Keep a reference so the API can inject files
+	_ = fuseOverlay
 
 	// 2. Set up eBPF network interceptor on spr0/eth0
 	aethernet.Setup(&l)
