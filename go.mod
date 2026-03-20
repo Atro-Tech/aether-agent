@@ -10,7 +10,6 @@ require (
 	connectrpc.com/authn v0.1.0
 	connectrpc.com/connect v1.18.1
 	connectrpc.com/cors v0.1.0
-	github.com/atro-tech/aether-agent/packages/shared v0.0.0
 	github.com/creack/pty v1.1.23
 	github.com/e2b-dev/fsnotify v0.0.1
 	github.com/go-chi/chi/v5 v5.2.2
@@ -25,12 +24,14 @@ require (
 )
 
 require (
+	github.com/atro-tech/aether-agent/packages/shared v0.0.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dchest/uniuri v1.2.0 // indirect
 	github.com/dprotaso/go-yit v0.0.0-20220510233725-9ba8df137936 // indirect
 	github.com/getkin/kin-openapi v0.133.0 // indirect
 	github.com/go-openapi/jsonpointer v0.22.1 // indirect
 	github.com/go-openapi/swag/jsonname v0.25.4 // indirect
+	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/mailru/easyjson v0.9.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect

@@ -19,6 +19,7 @@ import (
 	aethernet "github.com/atro-tech/aether-agent/internal/net"
 	filesystemRpc "github.com/atro-tech/aether-agent/internal/services/filesystem"
 	processRpc "github.com/atro-tech/aether-agent/internal/services/process"
+	"github.com/atro-tech/aether-agent/internal/tunnel"
 	"github.com/atro-tech/aether-agent/internal/utils"
 )
 
@@ -33,12 +34,14 @@ var (
 	Version = "0.1.0"
 
 	port        int64
+	callbackURL string
 	versionFlag bool
 )
 
 func main() {
 	flag.BoolVar(&versionFlag, "version", false, "print version")
 	flag.Int64Var(&port, "port", defaultPort, "port to listen on")
+	flag.StringVar(&callbackURL, "callback", "", "WebSocket URL to dial out to (reverse tunnel to control plane)")
 	flag.Parse()
 
 	if versionFlag {
@@ -112,6 +115,17 @@ func main() {
 	}
 
 	l.Info().Int64("port", port).Msg("listening")
+
+	// Start reverse tunnel if callback URL provided
+	if callbackURL != "" {
+		tunnelLogger := l.With().Str("component", "tunnel").Logger()
+		go tunnel.Start(tunnel.Config{
+			CallbackURL: callbackURL,
+			LocalPort:   int(port),
+			Logger:      &tunnelLogger,
+		})
+		l.Info().Str("callback", callbackURL).Msg("reverse tunnel started")
+	}
 
 	if err := s.ListenAndServe(); err != nil {
 		log.Fatalf("server error: %v", err)
