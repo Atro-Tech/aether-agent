@@ -131,6 +131,11 @@ func New(
 		},
 	}
 
+	// Chroot into the FUSE overlay so processes see the filtered filesystem
+	if defaults.UseOverlay {
+		cmd.SysProcAttr.Chroot = "/aether"
+	}
+
 	resolvedPath, err := permissions.ExpandAndResolve(req.GetProcess().GetCwd(), user, defaults.Workdir)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)

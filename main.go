@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
+	"syscall"
 	"time"
 
 	connectcors "connectrpc.com/cors"
@@ -19,7 +22,9 @@ import (
 
 	"github.com/atro-tech/aether-agent/internal/execcontext"
 	"github.com/atro-tech/aether-agent/internal/fuse"
+	"github.com/atro-tech/aether-agent/internal/manifest"
 	aethernet "github.com/atro-tech/aether-agent/internal/net"
+	"github.com/atro-tech/aether-agent/internal/network"
 	filesystemRpc "github.com/atro-tech/aether-agent/internal/services/filesystem"
 	processRpc "github.com/atro-tech/aether-agent/internal/services/process"
 	"github.com/atro-tech/aether-agent/internal/tunnel"
@@ -72,6 +77,7 @@ func main() {
 	// which Sprites doesn't support. So we mount at /aether and the
 	// overlay is accessible there.
 	var fuseOverlay *fuse.Overlay
+	overlayMounted := false
 
 	fuseMountPoint := "/aether"
 	fuseLogger := l.With().Str("component", "fuse").Logger()
@@ -84,21 +90,50 @@ func main() {
 			l.Warn().Err(err).Msg("FUSE mount failed (non-fatal)")
 		} else {
 			fuseOverlay = overlay
+			overlayMounted = true
 			go server.Wait()
 			l.Info().Str("mount", fuseMountPoint).Msg("FUSE overlay mounted")
 		}
 	}
 
-	// Keep a reference so the API can inject files
-	_ = fuseOverlay
+	// 2. Create manifest store and wire callbacks
+	store := manifest.NewStore()
 
-	// 2. Set up eBPF network interceptor on spr0/eth0
+	if fuseOverlay != nil {
+		fuseOverlay.SetStore(store)
+	}
+
+	// 3. Set up network firewall (default-deny egress)
+	firewallLogger := l.With().Str("component", "firewall").Logger()
+	tunnelHost, tunnelPort := parseTunnelURL(callbackURL)
+
+	fw, fwErr := network.Setup(&firewallLogger, tunnelHost, tunnelPort)
+	if fwErr != nil {
+		l.Warn().Err(fwErr).Msg("firewall setup failed (non-fatal)")
+	}
+
+	// Register manifest callbacks
+	store.OnUpdate(func(m *manifest.Manifest) {
+		if fw != nil {
+			if err := fw.Apply(m.Network); err != nil {
+				l.Warn().Err(err).Msg("failed to apply network rules")
+			}
+		}
+		l.Info().
+			Int("network_rules", len(m.Network)).
+			Int("filesystem_rules", len(m.Filesystem)).
+			Int("credentials", len(m.Credentials)).
+			Msg("manifest applied")
+	})
+
+	// 4. Set up eBPF network interceptor on spr0/eth0 (for credential routing)
 	aethernet.Setup(&l)
 
-	// 3. Start services
+	// 5. Start services
 	defaults := &execcontext.Defaults{
-		User:    defaultUser,
-		EnvVars: utils.NewMap[string, string](),
+		User:       defaultUser,
+		EnvVars:    utils.NewMap[string, string](),
+		UseOverlay: overlayMounted,
 	}
 
 	m := chi.NewRouter()
@@ -131,6 +166,14 @@ func main() {
 		if len(cmd.Env) > 0 {
 			cmd.Env = append(os.Environ(), cmd.Env...)
 		}
+
+		// Chroot into the FUSE overlay when available
+		if overlayMounted {
+			cmd.SysProcAttr = &syscall.SysProcAttr{
+				Chroot: "/aether",
+			}
+		}
+
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
@@ -148,6 +191,25 @@ func main() {
 			"stdout":    stdout.String(),
 			"stderr":    stderr.String(),
 			"exit_code": exitCode,
+		})
+	})
+
+	// Manifest push endpoint — receives full sandbox manifest from backend
+	m.Post("/shimmer/manifest", func(w http.ResponseWriter, r *http.Request) {
+		var man manifest.Manifest
+		if err := json.NewDecoder(r.Body).Decode(&man); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if err := store.Update(&man); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":               true,
+			"network_rules":    len(man.Network),
+			"filesystem_rules": len(man.Filesystem),
 		})
 	})
 
@@ -177,6 +239,33 @@ func main() {
 	}
 
 	_ = ctx
+}
+
+// parseTunnelURL extracts host and port from the callback WSS URL.
+func parseTunnelURL(rawURL string) (string, int) {
+	if rawURL == "" {
+		return "", 0
+	}
+
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", 0
+	}
+
+	host := u.Hostname()
+	portStr := u.Port()
+	if portStr == "" {
+		if u.Scheme == "wss" || u.Scheme == "https" {
+			return host, 443
+		}
+		return host, 80
+	}
+
+	p, err := strconv.Atoi(portStr)
+	if err != nil {
+		return host, 443
+	}
+	return host, p
 }
 
 func withCORS(h http.Handler) http.Handler {

@@ -4,14 +4,20 @@
 // to the real filesystem underneath. On top of that, we can inject
 // virtual files (lazy entries that appear instantly, bytes come later).
 //
+// When a manifest store is attached, the overlay enforces default-deny:
+// only paths matching manifest filesystem entries are visible. Without
+// a manifest (bootstrap grace), all paths pass through.
+//
 // The mount point is configurable. For Sprites, we mount at a staging
 // path and pivot_root into it (or use bind mounts).
 package fuse
 
 import (
+	"strings"
 	"sync"
 	"syscall"
 
+	"github.com/atro-tech/aether-agent/internal/manifest"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/rs/zerolog"
@@ -34,7 +40,23 @@ type Overlay struct {
 	mu       sync.RWMutex
 	virtuals map[string]*VirtualFile // name → virtual file (top level only for now)
 
+	store  *manifest.Store
 	logger *zerolog.Logger
+}
+
+// SetStore attaches a manifest store for filesystem policy enforcement.
+// Before a store is set (or before the store has a manifest), all paths pass through.
+func (o *Overlay) SetStore(s *manifest.Store) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.store = s
+}
+
+// getStore returns the attached store, or nil.
+func (o *Overlay) getStore() *manifest.Store {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.store
 }
 
 // Put adds a virtual file. It appears immediately in the filesystem.
@@ -82,7 +104,7 @@ func (o *Overlay) Remove(name string) {
 }
 
 // Lookup intercepts name resolution. Checks virtual files first,
-// then falls through to the real filesystem.
+// then enforces manifest policy, then falls through to real filesystem.
 var _ = (fs.NodeLookuper)((*Overlay)(nil))
 
 func (o *Overlay) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -99,21 +121,42 @@ func (o *Overlay) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 		return child, 0
 	}
 
-	// Fall through to real filesystem
-	return o.LoopbackNode.Lookup(ctx, name, out)
+	// Build full path for this child ("/" + name at root level)
+	childPath := "/" + name
+
+	// Enforce manifest policy
+	store := o.getStore()
+	if store != nil && store.HasManifest() {
+		if !isPathOrPrefixAllowed(store, childPath) {
+			return nil, syscall.ENOENT
+		}
+	}
+
+	// Fall through to real filesystem, wrapping directories in overlayDir
+	inode, errno := o.LoopbackNode.Lookup(ctx, name, out)
+	if errno != 0 {
+		return nil, errno
+	}
+
+	if out.Attr.Mode&syscall.S_IFDIR != 0 {
+		wrapped := &overlayDir{path: childPath, store: store, logger: o.logger}
+		child := o.NewPersistentInode(ctx, wrapped, fs.StableAttr{Mode: syscall.S_IFDIR})
+		return child, 0
+	}
+
+	return inode, 0
 }
 
-// Readdir merges virtual entries with real directory entries.
+// Readdir merges virtual entries with real directory entries,
+// filtering by manifest policy when active.
 var _ = (fs.NodeReaddirer)((*Overlay)(nil))
 
 func (o *Overlay) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	// Get real entries
 	realStream, errno := o.LoopbackNode.Readdir(ctx)
 	if errno != 0 {
 		return nil, errno
 	}
 
-	// Read all real entries
 	var entries []fuse.DirEntry
 	for realStream.HasNext() {
 		e, err := realStream.Next()
@@ -121,6 +164,20 @@ func (o *Overlay) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			break
 		}
 		entries = append(entries, e)
+	}
+
+	store := o.getStore()
+
+	// Filter by manifest if active
+	if store != nil && store.HasManifest() {
+		var filtered []fuse.DirEntry
+		for _, e := range entries {
+			childPath := "/" + e.Name
+			if isPathOrPrefixAllowed(store, childPath) {
+				filtered = append(filtered, e)
+			}
+		}
+		entries = filtered
 	}
 
 	// Add virtual entries (skip if name already exists in real)
@@ -142,6 +199,106 @@ func (o *Overlay) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 	return &sliceDirStream{entries: entries}, 0
 }
+
+// ── overlayDir: path-aware directory wrapper ────────────────────
+
+// overlayDir wraps a real directory with its full path and a store reference.
+// This lets Lookup at any depth enforce manifest policy.
+type overlayDir struct {
+	fs.LoopbackNode
+	path   string // full path from root, e.g. "/usr/local"
+	store  *manifest.Store
+	logger *zerolog.Logger
+}
+
+var _ = (fs.NodeLookuper)((*overlayDir)(nil))
+
+func (d *overlayDir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	childPath := d.path + "/" + name
+
+	// Enforce manifest policy
+	if d.store != nil && d.store.HasManifest() {
+		if !isPathOrPrefixAllowed(d.store, childPath) {
+			return nil, syscall.ENOENT
+		}
+	}
+
+	// Fall through to real filesystem
+	inode, errno := d.LoopbackNode.Lookup(ctx, name, out)
+	if errno != 0 {
+		return nil, errno
+	}
+
+	if out.Attr.Mode&syscall.S_IFDIR != 0 {
+		wrapped := &overlayDir{path: childPath, store: d.store, logger: d.logger}
+		child := d.NewPersistentInode(ctx, wrapped, fs.StableAttr{Mode: syscall.S_IFDIR})
+		return child, 0
+	}
+
+	return inode, 0
+}
+
+var _ = (fs.NodeReaddirer)((*overlayDir)(nil))
+
+func (d *overlayDir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	realStream, errno := d.LoopbackNode.Readdir(ctx)
+	if errno != 0 {
+		return nil, errno
+	}
+
+	var entries []fuse.DirEntry
+	for realStream.HasNext() {
+		e, err := realStream.Next()
+		if err != 0 {
+			break
+		}
+		entries = append(entries, e)
+	}
+
+	// Filter by manifest
+	if d.store != nil && d.store.HasManifest() {
+		var filtered []fuse.DirEntry
+		for _, e := range entries {
+			childPath := d.path + "/" + e.Name
+			if isPathOrPrefixAllowed(d.store, childPath) {
+				filtered = append(filtered, e)
+			}
+		}
+		entries = filtered
+	}
+
+	return &sliceDirStream{entries: entries}, 0
+}
+
+// ── Policy helpers ──────────────────────────────────────────────
+
+// isPathOrPrefixAllowed returns true if the path itself is allowed,
+// or if it's a prefix of an allowed path (so directory traversal works).
+// E.g. if "/usr/local/bin/claude" is allowed, "/usr" must be traversable.
+func isPathOrPrefixAllowed(store *manifest.Store, path string) bool {
+	// Direct match
+	allowed, _ := store.IsPathAllowed(path)
+	if allowed {
+		return true
+	}
+
+	// Check if this path is a prefix of any allowed path.
+	// E.g. path="/usr" should be traversable if "/usr/**" or "/usr/local/bin/x" is allowed.
+	m := store.Current()
+	if m == nil {
+		return true
+	}
+	for _, entry := range m.Filesystem {
+		// If the allowed pattern starts with this path, the directory is traversable
+		if strings.HasPrefix(entry.Path, path+"/") || strings.HasPrefix(entry.Path, path+"/**") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ── Virtual file nodes ──────────────────────────────────────────
 
 // virtualNode serves a virtual file's content.
 type virtualNode struct {
@@ -206,6 +363,8 @@ func (fh *virtualFileHandle) Read(ctx context.Context, dest []byte, off int64) (
 	return fuse.ReadResultData(fh.data[off:end]), 0
 }
 
+// ── Directory stream ────────────────────────────────────────────
+
 // sliceDirStream serves directory entries from a slice.
 type sliceDirStream struct {
 	entries []fuse.DirEntry
@@ -227,17 +386,12 @@ func (s *sliceDirStream) Next() (fuse.DirEntry, syscall.Errno) {
 
 func (s *sliceDirStream) Close() {}
 
+// ── Mount helpers ───────────────────────────────────────────────
+
 // Mount mounts the FUSE overlay.
 // basePath is the real filesystem root to proxy.
 // mountPoint is where to mount FUSE.
 func Mount(l *zerolog.Logger) {
-	// TODO: wire this into the boot sequence.
-	// For now, log readiness. The actual mount requires:
-	// 1. Choose basePath and mountPoint
-	// 2. Create LoopbackRoot pointing at basePath
-	// 3. Create Overlay wrapping it
-	// 4. fs.Mount(mountPoint, overlay, opts)
-	// 5. Run server.Wait() in a goroutine
 	l.Info().Msg("FUSE overlay ready (mount pending)")
 }
 

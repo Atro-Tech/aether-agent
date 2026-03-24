@@ -7,9 +7,10 @@ import (
 )
 
 type Defaults struct {
-	EnvVars *utils.Map[string, string]
-	User    string
-	Workdir *string
+	EnvVars    *utils.Map[string, string]
+	User       string
+	Workdir    *string
+	UseOverlay bool // true when FUSE overlay is mounted at /aether
 }
 
 func ResolveDefaultWorkdir(workdir string, defaultWorkdir *string) string {
